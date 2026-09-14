@@ -1,0 +1,222 @@
+@import "tailwindcss";
+
+/* ============================================================
+   DESIGN TOKEN SYSTEM
+   Premium tabletop aesthetic — midnight table, candlelit cards.
+   Fixed dark mode only. Tokens are CSS custom properties so
+   they can be overridden per-game via a scoped attribute.
+   ============================================================ */
+
+@layer base {
+  :root {
+    color-scheme: dark;
+
+    /* Backgrounds */
+    --color-background: 12 10 8;
+    --color-surface: 26 22 18;
+    --color-surface-raised: 38 32 26;
+    --color-surface-sunken: 18 15 12;
+    --color-surface-overlay: 8 6 5;
+
+    /* Text */
+    --color-text: 235 228 215;
+    --color-text-muted: 150 135 115;
+    --color-text-inverse: 22 17 13;
+    --color-text-disabled: 80 70 60;
+
+    /* Borders */
+    --color-border: 55 48 38;
+    --color-border-strong: 80 68 55;
+
+    /* Brand / Primary — forest green (tabletop felt) */
+    --color-primary: 50 130 85;
+    --color-primary-foreground: 12 10 8;
+    --color-primary-hover: 60 145 95;
+
+    /* Semantic */
+    --color-success: 50 130 85;
+    --color-success-foreground: 12 10 8;
+    --color-warning: 200 140 30;
+    --color-warning-foreground: 12 10 8;
+    --color-danger: 190 55 55;
+    --color-danger-foreground: 235 228 215;
+    --color-focus: 50 130 85;
+
+    /* Table surface (the game board area) */
+    --color-table: 15 55 30;
+    --color-table-alt: 12 45 24;
+
+    /* Card surfaces */
+    --color-card-face: 255 252 244;
+    --color-card-back: 20 35 75;
+    --color-card-border: 200 185 160;
+
+    /* Shadows — physical depth */
+    --shadow-low: 0 1px 3px rgb(0 0 0 / 0.4), 0 1px 2px rgb(0 0 0 / 0.3);
+    --shadow-medium: 0 4px 12px rgb(0 0 0 / 0.5), 0 2px 4px rgb(0 0 0 / 0.35);
+    --shadow-high: 0 8px 24px rgb(0 0 0 / 0.6), 0 4px 8px rgb(0 0 0 / 0.4);
+    --shadow-card: 0 2px 8px rgb(0 0 0 / 0.5), 0 1px 3px rgb(0 0 0 / 0.35);
+    --shadow-card-hover: 0 6px 20px rgb(0 0 0 / 0.6), 0 2px 6px rgb(0 0 0 / 0.4);
+    --shadow-modal: 0 20px 60px rgb(0 0 0 / 0.7), 0 8px 20px rgb(0 0 0 / 0.5);
+
+    /* Radius scale */
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 16px;
+    --radius-2xl: 24px;
+    --radius-card: 10px;
+    --radius-full: 9999px;
+
+    /* Spacing — safe areas */
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+
+    /* Typography */
+    --font-sans: "Inter", "Helvetica Neue", Arial, sans-serif;
+    --font-display: "Playfair Display", Georgia, serif;
+    --font-mono: "JetBrains Mono", "Fira Code", monospace;
+
+    /* Animation durations */
+    --duration-instant: 80ms;
+    --duration-fast: 150ms;
+    --duration-normal: 250ms;
+    --duration-slow: 400ms;
+    --duration-slower: 600ms;
+
+    /* Easing */
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-in: cubic-bezier(0.4, 0, 1, 1);
+    --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+    /* Touch targets */
+    --touch-target: 44px;
+
+    /* Z-index scale */
+    --z-base: 0;
+    --z-raised: 10;
+    --z-dropdown: 100;
+    --z-sticky: 200;
+    --z-game: 250;
+    --z-overlay: 300;
+    --z-modal: 400;
+    --z-toast: 500;
+    --z-tooltip: 600;
+  }
+}
+
+/* ============================================================
+   BASE STYLES
+   ============================================================ */
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    font-family: var(--font-sans);
+    background-color: rgb(var(--color-background));
+    color: rgb(var(--color-text));
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Prevent font size adjustment on orientation change */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    min-height: 100dvh;
+    /* Account for iOS safe areas */
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
+    /* Prevent pull-to-refresh overscroll in installed PWA */
+    overscroll-behavior-y: contain;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Installed PWA — app-like scrolling and touch behaviour */
+  @media (display-mode: standalone) {
+    html {
+      touch-action: manipulation;
+    }
+  }
+
+  /* Visible focus ring — keyboard navigation */
+  :focus-visible {
+    outline: 2px solid rgb(var(--color-focus));
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  /* Reduced motion — respect user preference */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* ============================================================
+   UTILITY CLASSES
+   ============================================================ */
+
+@layer utilities {
+  /* Color utilities that use our token system */
+  .bg-background    { background-color: rgb(var(--color-background)); }
+  .bg-surface       { background-color: rgb(var(--color-surface)); }
+  .bg-surface-raised { background-color: rgb(var(--color-surface-raised)); }
+  .bg-surface-sunken { background-color: rgb(var(--color-surface-sunken)); }
+  .bg-table         { background-color: rgb(var(--color-table)); }
+  .bg-primary       { background-color: rgb(var(--color-primary)); }
+
+  .text-base-color  { color: rgb(var(--color-text)); }
+  .text-muted       { color: rgb(var(--color-text-muted)); }
+  .text-inverse     { color: rgb(var(--color-text-inverse)); }
+  .text-primary     { color: rgb(var(--color-primary)); }
+
+  .border-base      { border-color: rgb(var(--color-border)); }
+  .border-strong    { border-color: rgb(var(--color-border-strong)); }
+
+  /* Shadow utilities */
+  .shadow-low       { box-shadow: var(--shadow-low); }
+  .shadow-medium    { box-shadow: var(--shadow-medium); }
+  .shadow-high      { box-shadow: var(--shadow-high); }
+  .shadow-card      { box-shadow: var(--shadow-card); }
+  .shadow-card-hover { box-shadow: var(--shadow-card-hover); }
+  .shadow-modal     { box-shadow: var(--shadow-modal); }
+
+  /* Touch target utility */
+  .touch-target {
+    min-height: var(--touch-target);
+    min-width: var(--touch-target);
+  }
+
+  /* Tabletop texture overlay (subtle noise for felt-like surfaces) */
+  .texture-felt::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+    pointer-events: none;
+    border-radius: inherit;
+  }
+
+  /* Safe area padding utilities */
+  .pt-safe { padding-top: var(--safe-top); }
+  .pb-safe { padding-bottom: var(--safe-bottom); }
+  .pl-safe { padding-left: var(--safe-left); }
+  .pr-safe { padding-right: var(--safe-right); }
+}
