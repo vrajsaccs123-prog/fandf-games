@@ -6,6 +6,7 @@ import { createRng } from "@/game/core/random";
 import type { GameConfig } from "@/game/core/types";
 import type { CodenamesState, CodenamesPlayer, Team, TeamInfo, WordCard } from "./types";
 import { CODENAMES_WORDS } from "./words";
+import { clampTimerSeconds } from "./timer";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,11 @@ export interface CodenamesSetupOptions {
   teams: Record<string, Team>;
   /** Which player is spymaster for each team */
   spymasters: { red: string; blue: string };
+  /**
+   * Seconds per clue-giving and guessing round.
+   * Omit or pass null to play without a timer.
+   */
+  timerSeconds?: number | null;
 }
 
 export function createInitialState(
@@ -101,6 +107,10 @@ export function createInitialState(
   const blueRemaining =
     startingTeam === "blue" ? STARTING_TEAM_COUNT : OTHER_TEAM_COUNT;
 
+  const rawTimer = options?.timerSeconds;
+  const timerSeconds =
+    typeof rawTimer === "number" && rawTimer > 0 ? clampTimerSeconds(rawTimer) : null;
+
   const teams: { red: TeamInfo; blue: TeamInfo } = {
     red: {
       playerIds: redPlayers.map((p) => p.id),
@@ -129,10 +139,12 @@ export function createInitialState(
     clueHistory: [],
     winner: null,
     winReason: null,
+    timerSeconds,
+    phaseStartedAt: timerSeconds != null ? Date.now() : null,
     events: [
       {
         type: "GAME_STARTED",
-        payload: { startingTeam },
+        payload: { startingTeam, timerSeconds },
         turn: 1,
         timestamp: Date.now(),
       },

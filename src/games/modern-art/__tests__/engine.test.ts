@@ -15,6 +15,7 @@ import type {
   HiddenAuctionState,
   FixedPriceAuctionState,
 } from "../types";
+import { OPEN_AUCTION_MIN_DURATION_MS } from "../types";
 import type { GameConfig } from "@/game/core/types";
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -43,6 +44,17 @@ function dispatch(state: ModernArtState, action: Parameters<typeof reduce>[1]) {
   const result = validateAction(state, action);
   if (!result.valid) throw new Error(`Invalid action: ${result.reason}`);
   return reduce(state, action);
+}
+
+function readyToClose(state: ModernArtState): ModernArtState {
+  if (!state.auction || state.auction.type !== "open") return state;
+  return {
+    ...state,
+    auction: {
+      ...state.auction,
+      openedAt: Date.now() - OPEN_AUCTION_MIN_DURATION_MS,
+    },
+  };
 }
 
 // ─── Setup Tests ──────────────────────────────────────────────────────────────
@@ -225,15 +237,35 @@ describe("Open Auction", () => {
     if (!setup) return;
     const { state } = setup;
     const nonAuctioneer = state.players.find((p) => p.id !== setup.auctioneerId)!;
-    const result = validateAction(state, { type: "CLOSE_OPEN_AUCTION", playerId: nonAuctioneer.id });
+    const result = validateAction(readyToClose(state), { type: "CLOSE_OPEN_AUCTION", playerId: nonAuctioneer.id });
     expect(result.valid).toBe(false);
+  });
+
+  it("cannot close before 10 seconds", () => {
+    const setup = startOpenAuction();
+    if (!setup) return;
+    const { state, auctioneerId } = setup;
+    const action = { type: "CLOSE_OPEN_AUCTION" as const, playerId: auctioneerId };
+    expect(validateAction(state, action).valid).toBe(false);
+    expect(reduce(state, action).phase).toBe("auction-open");
+  });
+
+  it("can close after 10 seconds", () => {
+    const setup = startOpenAuction();
+    if (!setup) return;
+    const { state, auctioneerId } = setup;
+    const result = validateAction(readyToClose(state), {
+      type: "CLOSE_OPEN_AUCTION",
+      playerId: auctioneerId,
+    });
+    expect(result.valid).toBe(true);
   });
 
   it("closing with no bids gives painting to auctioneer free", () => {
     const setup = startOpenAuction();
     if (!setup) return;
     const { state, auctioneerId } = setup;
-    const next = dispatch(state, { type: "CLOSE_OPEN_AUCTION", playerId: auctioneerId });
+    const next = dispatch(readyToClose(state), { type: "CLOSE_OPEN_AUCTION", playerId: auctioneerId });
     const auctioneer = next.players.find((p) => p.id === auctioneerId)!;
     // Painting goes to auctioneer's purchased
     expect(auctioneer.purchasedThisRound.length).toBeGreaterThanOrEqual(1);
@@ -248,7 +280,7 @@ describe("Open Auction", () => {
     const { state, auctioneerId } = setup;
     const winner = state.players.find((p) => p.id !== auctioneerId)!;
     let next = dispatch(state, { type: "OPEN_BID", playerId: winner.id, amount: 30 });
-    next = dispatch(next, { type: "CLOSE_OPEN_AUCTION", playerId: auctioneerId });
+    next = dispatch(readyToClose(next), { type: "CLOSE_OPEN_AUCTION", playerId: auctioneerId });
     const auctioneerAfter = next.players.find((p) => p.id === auctioneerId)!;
     const winnerAfter = next.players.find((p) => p.id === winner.id)!;
     expect(auctioneerAfter.money).toBe(130); // gained 30
@@ -263,7 +295,7 @@ describe("Open Auction", () => {
     const other = state.players.find((p) => p.id !== auctioneerId)!;
     let next = dispatch(state, { type: "OPEN_BID", playerId: other.id, amount: 20 });
     next = dispatch(next, { type: "OPEN_BID", playerId: auctioneerId, amount: 25 });
-    next = dispatch(next, { type: "CLOSE_OPEN_AUCTION", playerId: auctioneerId });
+    next = dispatch(readyToClose(next), { type: "CLOSE_OPEN_AUCTION", playerId: auctioneerId });
     const auctioneer = next.players.find((p) => p.id === auctioneerId)!;
     expect(auctioneer.money).toBe(75); // paid 25 to bank
     expect(auctioneer.purchasedThisRound.length).toBeGreaterThanOrEqual(1);

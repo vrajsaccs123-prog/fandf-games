@@ -20,7 +20,7 @@ export const codenamesHelp: GameHelpRules = {
     },
     {
       title: "Guessing",
-      text: "Teammates tap one card at a time. You may guess up to clue number + 1 cards, or pass after at least one guess.",
+      text: "Teammates tap a card to highlight it, then tap it again to guess. You can highlight several cards while discussing — only a second tap on a marked card locks in the guess. You may guess up to clue number + 1 cards, or pass after at least one guess.",
       items: [
         "Your team's card — revealed, keep guessing.",
         "Neutral card — turn ends.",
@@ -31,6 +31,10 @@ export const codenamesHelp: GameHelpRules = {
     {
       title: "Bonus Guess",
       text: "Teams always get one extra guess per turn. A clue of 3 allows up to 4 guesses.",
+    },
+    {
+      title: "Round Timer",
+      text: "The host can optionally add a timer (30 seconds to 3 minutes) for each clue-giving and guessing round. When time runs out, the turn ends and the other team starts their clue.",
     },
     {
       title: "Winning",

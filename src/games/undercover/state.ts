@@ -33,7 +33,7 @@ export function createInitialState(
   const civilians = options?.civilians ?? Math.max(Math.floor(config.players.length * 0.6), 2);
   const undercovers = options?.undercovers ?? Math.max(Math.floor(config.players.length * 0.25), 1);
   const mrWhites = config.players.length - civilians - undercovers;
-  const difficulty: WordDifficulty = options?.difficulty ?? "medium";
+  const difficulty: WordDifficulty = options?.difficulty ?? "easy";
   const mode = options?.mode ?? "offline";
 
   const specialCharacters: MatchSettings["specialCharacters"] = options?.specialCharacters ?? {
@@ -113,6 +113,7 @@ export function createInitialState(
 
     // Vote result / elimination
     voteResult: null,
+    pendingJudgeDecision: null,
     pendingElimination: null,
     eliminatedThisRound: [],
     pendingRevenger: null,
@@ -188,6 +189,7 @@ export function advanceToNextRound(state: UndercoverState): UndercoverState {
     clues: [],
     votes: {},
     voteResult: null,
+    pendingJudgeDecision: null,
     pendingElimination: null,
     eliminatedThisRound: [],
     pendingRevenger: null,

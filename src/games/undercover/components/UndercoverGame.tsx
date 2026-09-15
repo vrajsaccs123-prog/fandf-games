@@ -13,7 +13,7 @@ import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/Button";
 import type { UndercoverPlayerView, PublicPlayerInfo, PrivateCard } from "../selectors";
 import type { UndercoverAction } from "../actions";
-import type { WordDifficulty } from "../types";
+import type { SpecialCharacterSettings, WordDifficulty } from "../types";
 import { RulesDrawer, RulesHelpButton, useRulesHelp } from "@/components/game/RulesDrawer";
 import { getUndercoverHelp } from "../help";
 
@@ -23,7 +23,7 @@ interface UndercoverGameProps {
   view: UndercoverPlayerView;
   onAction: (action: UndercoverAction) => void;
   onExit?: () => void;
-  onPlayAgain?: (difficulty?: WordDifficulty) => void;
+  onPlayAgain?: (difficulty?: WordDifficulty, specialCharacters?: SpecialCharacterSettings) => void;
   onEndSession?: () => void;
   cumulativeScores?: Record<string, number>;
   gamesPlayed?: number;
@@ -590,15 +590,61 @@ function CluePhase({ view, onAction }: UndercoverGameProps) {
   );
 }
 
+// ─── Vote tally (shared by tie-break and host confirm) ────────────────────────
+
+function VoteTally({
+  view,
+  highlightIds,
+  pendingId,
+}: {
+  view: UndercoverPlayerView;
+  highlightIds: string[];
+  pendingId: string | null;
+}) {
+  if (!view.voteResult) return null;
+  const highlighted = new Set(highlightIds);
+
+  return (
+    <div className="w-full flex flex-col gap-2">
+      {Object.entries(view.voteResult.totals)
+        .sort(([, a], [, b]) => b - a)
+        .map(([targetId, count]) => {
+          const player = view.players.find((p) => p.id === targetId);
+          const isPending = targetId === pendingId;
+          const isHighlighted = highlighted.has(targetId);
+          return (
+            <div
+              key={targetId}
+              className={cn(
+                "flex items-center gap-3 p-3 rounded-xl",
+                isPending
+                  ? "bg-red-500/15 border-2 border-red-500"
+                  : isHighlighted
+                    ? "bg-[rgb(var(--color-primary))]/10 border-2 border-[rgb(var(--color-primary))]/40"
+                    : "bg-[rgb(var(--color-surface-raised))]"
+              )}
+            >
+              <PlayerAvatar player={player} />
+              <span className="font-semibold flex-1 text-[rgb(var(--color-text))]">{player?.name}</span>
+              <span className="font-bold text-[rgb(var(--color-text))]">
+                {count} vote{count !== 1 ? "s" : ""}
+              </span>
+            </div>
+          );
+        })}
+    </div>
+  );
+}
+
 // ─── Voting Phase ─────────────────────────────────────────────────────────────
 //
-// Two states:
-//   1. pendingElimination === null → voting is in progress
-//   2. pendingElimination is set → all votes in; show confirmation before eliminating
+// Three states (online):
+//   1. pendingElimination === null && !awaitingJudgeDecision → voting in progress
+//   2. awaitingJudgeDecision → vote tied; living Judge casts one extra vote
+//   3. pendingElimination is set → all votes in; host confirms or revotes
 //
 // Offline: OfflineEliminationPicker has its own confirmation; ADMIN_ELIMINATE
 //          goes straight to elimination_reveal.
-// Online: sequential voting → tally → single confirmation → CONFIRM_ELIMINATION.
 
 function VotingPhase({ view, onAction }: UndercoverGameProps) {
   // All hooks must be at the top (before any early returns)
@@ -617,6 +663,86 @@ function VotingPhase({ view, onAction }: UndercoverGameProps) {
     );
   }
 
+  // Online — tied vote: Judge casts one extra vote, then host confirms as usual
+  if (view.awaitingJudgeDecision && view.voteResult) {
+    const tiedPlayers = view.voteResult.leaders
+      .map((id) => view.players.find((p) => p.id === id))
+      .filter((p): p is PublicPlayerInfo => !!p);
+    const canJudgePick = view.isJudge && !view.players.find((p) => p.id === view.myPlayerId)?.isEliminated;
+
+    const handleJudgeVote = () => {
+      if (!selectedTarget || !canJudgePick) return;
+      onAction({ type: "JUDGE_DECISION", judgeId: view.myPlayerId, targetId: selectedTarget });
+      setSelectedTarget(null);
+    };
+
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-6 py-8">
+        <div className="text-5xl">⚖️</div>
+        <div className="text-center">
+          <h2 className="text-lg font-bold text-[rgb(var(--color-text))]">It&apos;s a tie!</h2>
+          <p className="text-sm text-[rgb(var(--color-text-muted))] mt-1">
+            {canJudgePick
+              ? "Cast one extra vote for a tied player. That vote breaks the tie."
+              : "Waiting for the Judge to cast an extra vote and break the tie."}
+          </p>
+        </div>
+
+        <VoteTally
+          view={view}
+          highlightIds={view.voteResult.leaders}
+          pendingId={null}
+        />
+
+        {canJudgePick ? (
+          <div className="w-full flex flex-col gap-3">
+            <div className="p-3 rounded-xl bg-[rgb(var(--color-primary))]/10 text-center text-sm font-medium text-[rgb(var(--color-primary))]">
+              ⚖️ Your extra vote — tap a tied player
+            </div>
+            <div className="flex flex-col gap-2">
+              {tiedPlayers.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => setSelectedTarget(p.id === selectedTarget ? null : p.id)}
+                  className={cn(
+                    "flex items-center gap-3 p-3 rounded-xl border-2 transition-all text-left",
+                    selectedTarget === p.id
+                      ? "border-red-500 bg-red-500/10"
+                      : "border-[rgb(var(--color-border))] bg-[rgb(var(--color-surface-raised))] hover:border-[rgb(var(--color-border-strong))]"
+                  )}
+                >
+                  <PlayerAvatar player={p} />
+                  <span className="font-semibold text-[rgb(var(--color-text))]">{p.name}</span>
+                  {selectedTarget === p.id && (
+                    <span className="ml-auto text-red-500 font-bold text-sm">✓ Selected</span>
+                  )}
+                </button>
+              ))}
+              <Button onClick={handleJudgeVote} disabled={!selectedTarget} variant="danger" size="lg" fullWidth className="mt-1">
+                Cast extra vote
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-[rgb(var(--color-text-muted))] text-center">
+            The Judge&apos;s identity stays secret.
+          </p>
+        )}
+
+        {view.isCreator && (
+          <Button
+            variant="secondary"
+            size="md"
+            fullWidth
+            onClick={() => onAction({ type: "REQUEST_REVOTE" })}
+          >
+            🔄 Revote
+          </Button>
+        )}
+      </div>
+    );
+  }
+
   // Online — all votes in: host confirms or calls a revote
   if (view.pendingElimination) {
     const target = view.players.find((p) => p.id === view.pendingElimination);
@@ -626,39 +752,26 @@ function VotingPhase({ view, onAction }: UndercoverGameProps) {
         <div className="text-center">
           <h2 className="text-lg font-bold text-[rgb(var(--color-text))]">Vote complete!</h2>
           <p className="text-sm text-[rgb(var(--color-text-muted))] mt-1">
-            {view.isCreator
-              ? "Confirm the elimination, or call a revote."
-              : "Waiting for the host to confirm the elimination."}
+            {view.voteResult?.tieBrokenByJudge
+              ? "The Judge broke the tie with an extra vote."
+              : view.isCreator
+                ? "Confirm the elimination, or call a revote."
+                : "Waiting for the host to confirm the elimination."}
           </p>
+          {view.voteResult?.tieBrokenByJudge && (
+            <p className="text-sm text-[rgb(var(--color-text-muted))] mt-1">
+              {view.isCreator
+                ? "Confirm the elimination, or call a revote."
+                : "Waiting for the host to confirm the elimination."}
+            </p>
+          )}
         </div>
 
-        {/* Vote tally */}
-        {view.voteResult && (
-          <div className="w-full flex flex-col gap-2">
-            {Object.entries(view.voteResult.totals)
-              .sort(([, a], [, b]) => b - a)
-              .map(([targetId, count]) => {
-                const player = view.players.find((p) => p.id === targetId);
-                return (
-                  <div
-                    key={targetId}
-                    className={cn(
-                      "flex items-center gap-3 p-3 rounded-xl",
-                      targetId === view.pendingElimination
-                        ? "bg-red-500/15 border-2 border-red-500"
-                        : "bg-[rgb(var(--color-surface-raised))]"
-                    )}
-                  >
-                    <PlayerAvatar player={player} />
-                    <span className="font-semibold flex-1 text-[rgb(var(--color-text))]">{player?.name}</span>
-                    <span className="font-bold text-[rgb(var(--color-text))]">
-                      {count} vote{count !== 1 ? "s" : ""}
-                    </span>
-                  </div>
-                );
-              })}
-          </div>
-        )}
+        <VoteTally
+          view={view}
+          highlightIds={view.pendingElimination ? [view.pendingElimination] : []}
+          pendingId={view.pendingElimination}
+        />
 
         <div className="w-full p-4 bg-red-500/10 border-2 border-red-500/30 rounded-xl text-center">
           <p className="text-sm text-[rgb(var(--color-text-muted))]">About to eliminate:</p>
@@ -1136,6 +1249,19 @@ function MrWhiteGuessPhase({ view, onAction }: UndercoverGameProps) {
 
 // ─── Game Over Phase ──────────────────────────────────────────────────────────
 
+const NEXT_GAME_SPECIALS: Array<{
+  key: keyof SpecialCharacterSettings;
+  name: string;
+  emoji: string;
+}> = [
+  { key: "judge",    name: "Judge",    emoji: "⚖️" },
+  { key: "joyFool",  name: "Joy Fool", emoji: "🤡" },
+  { key: "ghost",    name: "Ghost",    emoji: "👻" },
+  { key: "lovers",   name: "Lovers",   emoji: "💕" },
+  { key: "revenger", name: "Revenger", emoji: "🗡️" },
+  { key: "duelists", name: "Duelists", emoji: "⚔️" },
+];
+
 function GameOverPhase({
   view,
   onPlayAgain,
@@ -1144,7 +1270,7 @@ function GameOverPhase({
   gamesPlayed,
 }: {
   view: UndercoverPlayerView;
-  onPlayAgain?: (difficulty?: WordDifficulty) => void;
+  onPlayAgain?: (difficulty?: WordDifficulty, specialCharacters?: SpecialCharacterSettings) => void;
   onEndSession?: () => void;
   cumulativeScores?: Record<string, number>;
   gamesPlayed: number;
@@ -1158,6 +1284,21 @@ function GameOverPhase({
   };
   const hasCumulative = cumulativeScores && Object.keys(cumulativeScores).length > 0 && gamesPlayed > 0;
   const [nextDifficulty, setNextDifficulty] = React.useState<WordDifficulty>(view.wordDifficulty);
+  const [nextSpecials, setNextSpecials] = React.useState<SpecialCharacterSettings>(
+    view.activeSpecialCharacters
+  );
+  const enabledSpecialCount = NEXT_GAME_SPECIALS.filter((s) => nextSpecials[s.key]).length;
+
+  function toggleSpecial(key: keyof SpecialCharacterSettings) {
+    setNextSpecials((prev) => ({ ...prev, [key]: !prev[key] }));
+  }
+
+  function setAllSpecials(value: boolean) {
+    setNextSpecials({
+      judge: value, joyFool: value, ghost: value,
+      lovers: value, revenger: value, duelists: value,
+    });
+  }
 
   return (
     <div className="flex-1 flex flex-col items-center gap-6 py-6">
@@ -1255,32 +1396,98 @@ function GameOverPhase({
       <div className="w-full flex flex-col gap-2 mt-2">
         {onPlayAgain && (
           <>
-            <div className="w-full p-3 rounded-xl bg-[rgb(var(--color-surface-raised))] border border-[rgb(var(--color-border))]">
-              <p className="text-xs font-semibold text-[rgb(var(--color-text-muted))] uppercase tracking-wide mb-2">
-                Word difficulty for next game
-              </p>
-              <div className="flex gap-2">
-                {([
-                  { value: "easy" as const, label: "Easy" },
-                  { value: "medium" as const, label: "Medium" },
-                  { value: "difficult" as const, label: "Difficult" },
-                ]).map((opt) => (
-                  <button
-                    key={opt.value}
-                    onClick={() => setNextDifficulty(opt.value)}
-                    className={cn(
-                      "flex-1 py-2 rounded-lg text-xs font-semibold border-2 capitalize transition-all",
-                      nextDifficulty === opt.value
-                        ? "border-[rgb(var(--color-primary))] bg-[rgb(var(--color-primary))]/10 text-[rgb(var(--color-primary))]"
-                        : "border-[rgb(var(--color-border))] text-[rgb(var(--color-text-muted))] hover:border-[rgb(var(--color-border-strong))]"
-                    )}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
+            <div className="w-full p-3 rounded-xl bg-[rgb(var(--color-surface-raised))] border border-[rgb(var(--color-border))] flex flex-col gap-3">
+              <div>
+                <p className="text-xs font-semibold text-[rgb(var(--color-text-muted))] uppercase tracking-wide mb-2">
+                  Word difficulty for next game
+                </p>
+                <div className="flex gap-2">
+                  {([
+                    { value: "easy" as const, label: "Easy" },
+                    { value: "medium" as const, label: "Medium" },
+                    { value: "difficult" as const, label: "Difficult" },
+                  ]).map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setNextDifficulty(opt.value)}
+                      className={cn(
+                        "flex-1 py-2 rounded-lg text-xs font-semibold border-2 capitalize transition-all",
+                        nextDifficulty === opt.value
+                          ? "border-[rgb(var(--color-primary))] bg-[rgb(var(--color-primary))]/10 text-[rgb(var(--color-primary))]"
+                          : "border-[rgb(var(--color-border))] text-[rgb(var(--color-text-muted))] hover:border-[rgb(var(--color-border-strong))]"
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="text-xs font-semibold text-[rgb(var(--color-text-muted))] uppercase tracking-wide">
+                    Special characters
+                    <span className="ml-1 font-normal normal-case tracking-normal">
+                      ({enabledSpecialCount}/{NEXT_GAME_SPECIALS.length})
+                    </span>
+                  </p>
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setAllSpecials(true)}
+                      className="px-2 py-1 rounded-md text-[10px] font-semibold text-[rgb(var(--color-primary))] hover:bg-[rgb(var(--color-primary))]/10"
+                    >
+                      All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAllSpecials(false)}
+                      className="px-2 py-1 rounded-md text-[10px] font-semibold text-[rgb(var(--color-text-muted))] hover:bg-[rgb(var(--color-border))]/40"
+                    >
+                      None
+                    </button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {NEXT_GAME_SPECIALS.map((sc) => {
+                    const active = nextSpecials[sc.key];
+                    return (
+                      <button
+                        key={sc.key}
+                        type="button"
+                        onClick={() => toggleSpecial(sc.key)}
+                        className={cn(
+                          "flex items-center gap-2 px-2.5 py-2 rounded-lg border-2 text-left transition-all",
+                          active
+                            ? "border-violet-500 bg-violet-500/10"
+                            : "border-[rgb(var(--color-border))] text-[rgb(var(--color-text-muted))] hover:border-[rgb(var(--color-border-strong))]"
+                        )}
+                      >
+                        <span className="text-base shrink-0">{sc.emoji}</span>
+                        <span className={cn(
+                          "flex-1 min-w-0 text-xs font-semibold truncate",
+                          active ? "text-[rgb(var(--color-text))]" : "text-[rgb(var(--color-text-muted))]"
+                        )}>
+                          {sc.name}
+                        </span>
+                        <span className={cn(
+                          "text-[10px] font-bold shrink-0",
+                          active ? "text-violet-500" : "text-[rgb(var(--color-text-muted))]"
+                        )}>
+                          {active ? "ON" : "OFF"}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
-            <Button variant="primary" size="lg" fullWidth onClick={() => onPlayAgain(nextDifficulty)}>
+            <Button
+              variant="primary"
+              size="lg"
+              fullWidth
+              onClick={() => onPlayAgain(nextDifficulty, nextSpecials)}
+            >
               🔄 Play Another Game
             </Button>
           </>

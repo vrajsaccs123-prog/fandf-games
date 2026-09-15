@@ -24,7 +24,14 @@ import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/Button";
 import { useOnlineRoom } from "@/hooks/useOnlineRoom";
 import type { RoomInfo } from "@/lib/online/types";
-import { normalizeRoomCode, isValidRoomCode } from "@/lib/online/roomCode";
+import {
+  formatJoinCodeInput,
+  joinPayloadFromInput,
+  connectedMembers,
+  isMemberConnected,
+} from "@/lib/online/reconnectCode";
+import { DisconnectedPlayersNotice, ConnectionDot } from "@/components/online/DisconnectedPlayersNotice";
+import { HostTransferOverlay } from "@/components/online/HostTransferOverlay";
 import { undercoverFacts } from "../rules";
 import { createInitialState } from "../state";
 import { reduce } from "../reducer";
@@ -46,7 +53,7 @@ interface WaitingSettings {
 const DEFAULT_SETTINGS: WaitingSettings = {
   undercovers: 1,
   mrWhites: 1,
-  difficulty: "medium",
+  difficulty: "easy",
   specialCharacters: {
     judge: false, joyFool: false, ghost: false,
     lovers: false, revenger: false, duelists: false,
@@ -86,6 +93,7 @@ export function UndercoverOnline({ onExit }: UndercoverOnlineProps) {
   const [joinCode, setJoinCode] = React.useState("");
   const [myName, setMyName] = React.useState("");
   const [initialRoomCode, setInitialRoomCode] = React.useState("");
+  const [reconnectToken, setReconnectToken] = React.useState<string | undefined>();
 
   // Stable player ID for this session (unique per browser tab)
   const [myPlayerId] = React.useState(() => `uc-${Date.now()}`);
@@ -100,7 +108,7 @@ export function UndercoverOnline({ onExit }: UndercoverOnlineProps) {
           {(
             [
               { label: "Create Room", sub: "Host a game for friends", emoji: "🏠", action: "create" as const },
-              { label: "Join Room",   sub: "Enter a 6-letter code",   emoji: "🔗", action: "join"   as const },
+              { label: "Join Room",   sub: "Enter a room or rejoin code", emoji: "🔗", action: "join"   as const },
             ]
           ).map((opt) => (
             <button
@@ -172,18 +180,18 @@ export function UndercoverOnline({ onExit }: UndercoverOnlineProps) {
   // ── Join Room ─────────────────────────────────────────────────────────────
 
   if (screen === "join") {
-    const normalised = normalizeRoomCode(joinCode);
-    const codeValid = isValidRoomCode(normalised);
-    const ready = joinName.trim().length >= 1 && codeValid;
+    const payload = joinPayloadFromInput(joinCode);
+    const isRejoin = Boolean(payload?.reconnectToken);
+    const ready = payload !== null && (isRejoin || joinName.trim().length >= 1);
     return (
       <div className="flex flex-col gap-4">
         <h3 className="font-semibold text-[rgb(var(--color-text))]">Join a Room</h3>
         <input
           type="text"
-          placeholder="Room code (6 letters)"
+          placeholder="Room code or rejoin code"
           value={joinCode}
-          onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-          maxLength={6}
+          onChange={(e) => setJoinCode(formatJoinCodeInput(e.target.value))}
+          maxLength={11}
           autoFocus
           className={cn(
             "h-11 px-3 rounded-lg border text-sm font-mono tracking-widest uppercase",
@@ -193,12 +201,22 @@ export function UndercoverOnline({ onExit }: UndercoverOnlineProps) {
             "focus:outline-none focus:ring-2 focus:ring-[rgb(var(--color-focus))]"
           )}
         />
+        <p className="text-xs text-[rgb(var(--color-text-muted))] -mt-2">
+          Got disconnected? Paste the rejoin code your friends share to reclaim your seat.
+        </p>
         <input
           type="text"
-          placeholder="Your name"
+          placeholder={isRejoin ? "Your name (optional)" : "Your name"}
           value={joinName}
           onChange={(e) => setJoinName(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && ready) { setMyName(joinName.trim()); setInitialRoomCode(normalised); setScreen("room"); }}}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && ready && payload) {
+              setMyName(joinName.trim() || "Player");
+              setInitialRoomCode(payload.roomCode);
+              setReconnectToken(payload.reconnectToken);
+              setScreen("room");
+            }
+          }}
           maxLength={20}
           className={cn(
             "h-11 px-3 rounded-lg border text-sm",
@@ -213,10 +231,16 @@ export function UndercoverOnline({ onExit }: UndercoverOnlineProps) {
           <Button
             variant="primary"
             disabled={!ready}
-            onClick={() => { setMyName(joinName.trim()); setInitialRoomCode(normalised); setScreen("room"); }}
+            onClick={() => {
+              if (!payload) return;
+              setMyName(joinName.trim() || "Player");
+              setInitialRoomCode(payload.roomCode);
+              setReconnectToken(payload.reconnectToken);
+              setScreen("room");
+            }}
             className="flex-1"
           >
-            Join →
+            {isRejoin ? "Rejoin →" : "Join →"}
           </Button>
         </div>
       </div>
@@ -231,6 +255,7 @@ export function UndercoverOnline({ onExit }: UndercoverOnlineProps) {
       myPlayerId={myPlayerId}
       myName={myName}
       initialRoomCode={isHost ? "" : initialRoomCode}
+      initialReconnectToken={reconnectToken}
       onExit={onExit}
     />
   );
@@ -243,10 +268,11 @@ interface OnlineRoomProps {
   myPlayerId: string;
   myName: string;
   initialRoomCode: string;
+  initialReconnectToken?: string;
   onExit: () => void;
 }
 
-function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: OnlineRoomProps) {
+function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, initialReconnectToken, onExit }: OnlineRoomProps) {
 
   // ── Host: authoritative refs (avoid stale closures) ────────────────────────
   const settingsRef = React.useRef<WaitingSettings>({ ...DEFAULT_SETTINGS });
@@ -260,7 +286,10 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
 
   // Non-host: sync state received from host
   const [syncState, setSyncState] = React.useState<UndercoverSync | null>(null);
+  const syncStateRef = React.useRef<UndercoverSync | null>(null);
   const [roomInfo, setRoomInfo] = React.useState<RoomInfo | null>(null);
+  const hostingRef = React.useRef(isHost);
+  const playerIdRef = React.useRef(myPlayerId);
 
   // Cumulative scores across games (tracked locally per device)
   const [cumulativeScores, setCumulativeScores] = React.useState<Record<string, number>>({});
@@ -279,8 +308,9 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
     broadcastRef.current({ phase: "game", gameState: gs } satisfies UndercoverSync);
   }
 
-  function buildPlayersFromRoom(info: RoomInfo) {
-    return info.members.map((m, i) => ({
+  function buildPlayersFromRoom(info: RoomInfo, onlyConnected = false) {
+    const list = onlyConnected ? connectedMembers(info.members) : info.members;
+    return list.map((m, i) => ({
       id: m.id,
       name: m.name,
       seat: i,
@@ -296,12 +326,12 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
 
     onGameState: (raw) => {
       const sync = raw as UndercoverSync;
+      syncStateRef.current = sync;
       setSyncState(sync);
       if (sync.phase === "game") {
         gameStateRef.current = sync.gameState;
         setGameState(sync.gameState);
       } else {
-        // Returning to lobby (host reset)
         gameStateRef.current = null;
         setGameState(null);
         settingsRef.current = sync.settings;
@@ -310,7 +340,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
     },
 
     onAction: (rawAction, fromPlayerId) => {
-      if (!isHost) return;
+      if (!hostingRef.current) return;
       const action = rawAction as UndercoverAction;
       const gs = gameStateRef.current;
       if (!gs) return;
@@ -326,6 +356,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
       // Players may only act as themselves
       if (
         (action.type === "SUBMIT_VOTE" && action.voterId !== fromPlayerId) ||
+        (action.type === "JUDGE_DECISION" && action.judgeId !== fromPlayerId) ||
         (action.type === "SUBMIT_CLUE" && action.playerId !== fromPlayerId) ||
         (action.type === "SUBMIT_MR_WHITE_GUESS" && action.playerId !== fromPlayerId) ||
         (action.type === "REVENGER_TARGET" && action.revengerId !== fromPlayerId) ||
@@ -352,16 +383,36 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
       setMemberNames(newNames);
 
       // Host: re-broadcast lobby so new joiners get current settings
-      if (isHost) {
+      if (hostingRef.current) {
         broadcastLobby();
       }
     },
 
     onGameStarted: () => {},
-    onPlayerDisconnected: () => {
-      // Could show a toast; for now just let players reconnect
+    onBecameHost: () => {
+      const sync = syncStateRef.current;
+      if (sync?.phase === "lobby") {
+        settingsRef.current = sync.settings;
+        setSettings(sync.settings);
+      }
+      if (sync?.phase === "game") {
+        const next = {
+          ...sync.gameState,
+          creatorId: playerIdRef.current,
+        };
+        gameStateRef.current = next;
+        setGameState(next);
+      } else if (gameStateRef.current) {
+        const next = { ...gameStateRef.current, creatorId: playerIdRef.current };
+        gameStateRef.current = next;
+        setGameState(next);
+      }
     },
   });
+
+  const hosting = room.isHost;
+  hostingRef.current = hosting;
+  playerIdRef.current = room.myPlayerId;
 
   broadcastRef.current = room.broadcastState;
 
@@ -374,7 +425,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
     if (isHost) {
       room.createRoom(myName);
     } else {
-      room.joinRoom(initialRoomCode, myName);
+      room.joinRoom(initialRoomCode, myName, { reconnectToken: initialReconnectToken });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -383,7 +434,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
 
   const prevBroadcastKeyRef = React.useRef("");
   React.useEffect(() => {
-    if (!isHost) return;
+    if (!hosting) return;
     const key = gameState
       ? [
           gameState.phase,
@@ -391,6 +442,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
           gameState.clues.length,
           Object.keys(gameState.votes).length,
           gameState.pendingElimination ?? "",
+          gameState.pendingJudgeDecision ?? "",
           gameState.pendingMrWhiteGuess ?? "",
           gameState.winCondition?.faction ?? "",
           gameState.cardsRevealed.length,
@@ -416,8 +468,8 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
   // ── Start game ────────────────────────────────────────────────────────────
 
   function handleStartGame() {
-    if (!isHost || !roomInfo) return;
-    const players = buildPlayersFromRoom(roomInfo);
+    if (!hosting || !roomInfo) return;
+    const players = buildPlayersFromRoom(roomInfo, true);
     if (players.length < undercoverFacts.minPlayers) return;
 
     const s = settingsRef.current;
@@ -448,7 +500,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
   // ── Game actions ──────────────────────────────────────────────────────────
 
   function handleGameAction(action: UndercoverAction) {
-    if (isHost) {
+    if (hosting) {
       const gs = gameStateRef.current;
       if (!gs) return;
       const result = validateAction(gs, action);
@@ -478,17 +530,16 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
 
   // ── Play Again (host restarts with same players/settings) ─────────────────
 
-  function handlePlayAgain(difficulty?: WordDifficulty) {
-    if (!isHost || !roomInfo) return;
+  function handlePlayAgain(difficulty?: WordDifficulty, specialCharacters?: SpecialCharacterSettings) {
+    if (!hosting || !roomInfo) return;
     accumulateAndIncrement();
 
     const players = buildPlayersFromRoom(roomInfo);
     const s = settingsRef.current;
-    if (difficulty) {
-      s.difficulty = difficulty;
-      settingsRef.current = s;
-      setSettings({ ...s });
-    }
+    if (difficulty) s.difficulty = difficulty;
+    if (specialCharacters) s.specialCharacters = specialCharacters;
+    settingsRef.current = s;
+    setSettings({ ...s });
     const civilians = players.length - s.undercovers - s.mrWhites;
     if (civilians < 1) {
       // Invalid config — fall back to waiting room
@@ -537,13 +588,13 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
 
   // ── Derive display values ─────────────────────────────────────────────────
 
-  const displayGameState: UndercoverState | null = isHost
+  const displayGameState: UndercoverState | null = hosting
     ? gameState
     : syncState?.phase === "game"
     ? syncState.gameState
     : null;
 
-  const displaySettings: WaitingSettings = isHost
+  const displaySettings: WaitingSettings = hosting
     ? settings
     : syncState?.phase === "lobby"
     ? syncState.settings
@@ -563,12 +614,16 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
 
   // ── Connecting spinner ────────────────────────────────────────────────────
 
-  if (room.status === "creating" || room.status === "joining") {
+  if (room.status === "creating" || room.status === "joining" || room.status === "transferring") {
     return (
       <div className="flex flex-col gap-3 items-center py-8 text-center">
         <div className="text-3xl animate-pulse">🔗</div>
         <p className="text-[rgb(var(--color-text-muted))] text-sm">
-          {room.status === "creating" ? "Creating room…" : "Connecting to room…"}
+          {room.status === "creating"
+            ? "Creating room…"
+            : room.status === "transferring"
+            ? "The host left. Passing the room to another player…"
+            : "Connecting to room…"}
         </p>
       </div>
     );
@@ -577,15 +632,22 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
   // ── Active game ───────────────────────────────────────────────────────────
 
   if (displayGameState) {
-    const view = getPlayerView(displayGameState, myPlayerId);
+    const view = getPlayerView(displayGameState, room.myPlayerId);
     return (
       <div className="fixed inset-0 z-[var(--z-game)] bg-[rgb(var(--color-surface-sunken))] overflow-y-auto">
+        <div className="fixed top-3 left-1/2 -translate-x-1/2 z-50 w-[min(24rem,calc(100%-1.5rem))]">
+          <DisconnectedPlayersNotice
+            members={roomInfo?.members}
+            roomCode={room.roomCode}
+            compact
+          />
+        </div>
         <UndercoverGame
           view={view}
           onAction={handleGameAction}
           onExit={handleLeave}
-          onPlayAgain={isHost ? handlePlayAgain : undefined}
-          onEndSession={isHost ? handleEndSession : undefined}
+          onPlayAgain={hosting ? handlePlayAgain : undefined}
+          onEndSession={hosting ? handleEndSession : undefined}
           cumulativeScores={cumulativeScores}
           gamesPlayed={gamesPlayed}
         />
@@ -595,11 +657,11 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
 
   // ── Waiting room ──────────────────────────────────────────────────────────
 
-  const members = roomInfo?.members ?? [{ id: myPlayerId, name: myName, role: "host" as const, peerId: "" }];
-  const playerCount = members.length;
+  const members = roomInfo?.members ?? [{ id: myPlayerId, name: myName, role: "host" as const, peerId: "", connected: true }];
+  const playerCount = connectedMembers(members).length;
   const civilians = playerCount - displaySettings.undercovers - displaySettings.mrWhites;
   const canStart =
-    isHost &&
+    hosting &&
     playerCount >= undercoverFacts.minPlayers &&
     civilians >= 1 &&
     displaySettings.undercovers >= 1;
@@ -612,15 +674,15 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
 
   return (
     <WaitingRoom
-      isHost={isHost}
-      myPlayerId={myPlayerId}
+      isHost={hosting}
+      myPlayerId={room.myPlayerId}
       roomCode={room.roomCode}
       members={members}
       settings={displaySettings}
       civilians={civilians}
       canStart={canStart}
       startErrors={startErrors}
-      onSettingsChange={isHost ? handleSettingsChange : undefined}
+      onSettingsChange={hosting ? handleSettingsChange : undefined}
       onStartGame={handleStartGame}
       onLeave={handleLeave}
     />
@@ -633,7 +695,7 @@ interface WaitingRoomProps {
   isHost: boolean;
   myPlayerId: string;
   roomCode: string | null;
-  members: Array<{ id: string; name: string; role: string }>;
+  members: Array<{ id: string; name: string; role: string; connected?: boolean; reconnectCode?: string }>;
   settings: WaitingSettings;
   civilians: number;
   canStart: boolean;
@@ -668,10 +730,16 @@ function WaitingRoom({
         </div>
       )}
 
+      <DisconnectedPlayersNotice members={members} roomCode={roomCode} />
+
       {/* ── Players ──────────────────────────────────────────────────────── */}
       <div>
         <p className="text-sm font-semibold text-[rgb(var(--color-text))] mb-2">
-          Players ({members.length})
+          Players ({connectedMembers(members).length}
+          {members.length !== connectedMembers(members).length
+            ? ` connected · ${members.length} seated`
+            : ""}
+          )
         </p>
         <div className="flex flex-col gap-1.5">
           {members.map((m) => (
@@ -683,13 +751,16 @@ function WaitingRoom({
                 "flex items-center gap-2 px-3 py-2 rounded-lg text-sm",
                 m.id === myPlayerId
                   ? "bg-[rgb(var(--color-primary))]/10 border border-[rgb(var(--color-primary))]/30 font-semibold"
-                  : "bg-[rgb(var(--color-surface-raised))]"
+                  : "bg-[rgb(var(--color-surface-raised))]",
+                !isMemberConnected(m) && "opacity-60"
               )}
             >
+              <ConnectionDot connected={isMemberConnected(m)} />
               <span>{m.role === "host" ? "👑" : "👤"}</span>
               <span className="flex-1 text-[rgb(var(--color-text))]">
                 {m.name}
                 {m.id === myPlayerId && <span className="ml-1 text-[rgb(var(--color-text-muted))] font-normal">(you)</span>}
+                {!isMemberConnected(m) && <span className="ml-1 text-red-400 font-normal">(away)</span>}
               </span>
               {m.role === "host" && (
                 <span className="text-xs text-[rgb(var(--color-text-muted))]">Host</span>

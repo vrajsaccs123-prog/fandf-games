@@ -5,6 +5,7 @@
 import type { ValidationResult } from "@/game/core/types";
 import type { CodenamesState } from "./types";
 import type { CodenamesAction } from "./actions";
+import { isTimerElapsed } from "./timer";
 
 export function validateAction(
   state: CodenamesState,
@@ -17,6 +18,8 @@ export function validateAction(
       return validateGuessCard(state, action.playerId, action.cardId);
     case "END_TURN":
       return validateEndTurn(state, action.playerId);
+    case "TIMER_EXPIRED":
+      return validateTimerExpired(state);
     default:
       return { valid: false, reason: "Unknown action" };
   }
@@ -76,6 +79,19 @@ function validateEndTurn(
   if (player.isSpymaster) return { valid: false, reason: "Spymasters cannot end the turn" };
   if (player.team !== state.currentTeam) {
     return { valid: false, reason: "It is not your team's turn" };
+  }
+  return { valid: true };
+}
+
+function validateTimerExpired(state: CodenamesState): ValidationResult {
+  if (state.phase !== "giving_clue" && state.phase !== "guessing") {
+    return { valid: false, reason: "No active timed round" };
+  }
+  if (state.timerSeconds == null || state.phaseStartedAt == null) {
+    return { valid: false, reason: "Timer is not enabled" };
+  }
+  if (!isTimerElapsed(state)) {
+    return { valid: false, reason: "Timer has not elapsed" };
   }
   return { valid: true };
 }

@@ -17,7 +17,7 @@ import type { UndercoverState } from "@/games/undercover/types";
 export type BlackjackSession =
   | { type: "offline"; config: GameConfig }
   | { type: "online-host"; config: GameConfig }
-  | { type: "online-join"; playerId: string; roomCode: string; playerName: string };
+  | { type: "online-join"; playerId: string; roomCode: string; playerName: string; reconnectToken?: string };
 
 // ─── Undercover ───────────────────────────────────────────────────────────────
 
@@ -30,13 +30,13 @@ export type UndercoverSession = {
 
 export type ModernArtSession =
   | { type: "online-host"; hostName: string; playerId: string }
-  | { type: "online-join"; playerId: string; roomCode: string; playerName: string };
+  | { type: "online-join"; playerId: string; roomCode: string; playerName: string; reconnectToken?: string };
 
 // ─── Cabo ─────────────────────────────────────────────────────────────────────
 
 export type CaboSession =
   | { type: "online-host"; config: GameConfig; myPlayerId: string }
-  | { type: "online-join"; playerId: string; roomCode: string; playerName: string };
+  | { type: "online-join"; playerId: string; roomCode: string; playerName: string; reconnectToken?: string };
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 

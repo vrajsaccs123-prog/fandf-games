@@ -16,6 +16,7 @@ import type {
   HiddenAuctionState,
   FixedPriceAuctionState,
 } from "../types";
+import { openAuctionLockRemainingMs } from "../types";
 import type { ModernArtAction } from "../actions";
 import { PaintingCard, AuctionTypeIcon } from "./PaintingCard";
 import { PlayerHand } from "./PlayerHand";
@@ -138,9 +139,25 @@ function OpenAuctionControls({
   onAction: (action: ModernArtAction) => void;
 }) {
   const [customBid, setCustomBid] = React.useState("");
+  const [now, setNow] = React.useState(() => Date.now());
   const minBid = auction.currentHighestBid + 1;
   const canBid = myPlayer.money >= minBid;
   const currentLeader = players.find((p) => p.id === auction.currentHighestBidderId);
+  const lockMs = openAuctionLockRemainingMs(auction.openedAt, now);
+  const canHammer = lockMs <= 0;
+
+  React.useEffect(() => {
+    setNow(Date.now());
+    if (openAuctionLockRemainingMs(auction.openedAt) <= 0) return;
+    const id = window.setInterval(() => {
+      const t = Date.now();
+      setNow(t);
+      if (openAuctionLockRemainingMs(auction.openedAt, t) <= 0) {
+        window.clearInterval(id);
+      }
+    }, 200);
+    return () => window.clearInterval(id);
+  }, [auction.openedAt]);
 
   function handleBid(amount: number) {
     onAction({ type: "OPEN_BID", playerId: myPlayer.id, amount });
@@ -228,16 +245,22 @@ function OpenAuctionControls({
         </p>
       )}
 
-      {/* Auctioneer close button */}
+      {/* Auctioneer close button — locked for the first 10 seconds */}
       {isAuctioneer && (
         <Button
           variant="secondary"
           size="md"
           fullWidth
-          onClick={() => onAction({ type: "CLOSE_OPEN_AUCTION", playerId: myPlayer.id })}
+          disabled={!canHammer}
+          onClick={() => {
+            if (!canHammer) return;
+            onAction({ type: "CLOSE_OPEN_AUCTION", playerId: myPlayer.id });
+          }}
           className="border-amber-500/30 text-amber-300"
         >
-          🔨 Hammer Down — Sold!
+          {canHammer
+            ? "🔨 Hammer Down — Sold!"
+            : `🔨 Hammer Down — ${Math.ceil(lockMs / 1000)}s`}
         </Button>
       )}
     </div>

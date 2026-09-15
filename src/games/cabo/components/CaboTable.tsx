@@ -21,6 +21,9 @@ import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
 import { useOnlineRoom } from '@/hooks/useOnlineRoom';
 import type { RoomInfo } from '@/lib/online/types';
+import { connectedMembers, isMemberConnected } from '@/lib/online/reconnectCode';
+import { DisconnectedPlayersNotice } from '@/components/online/DisconnectedPlayersNotice';
+import { HostTransferOverlay } from '@/components/online/HostTransferOverlay';
 import { caboFacts } from '../rules';
 import { createInitialState } from '../state';
 import { reduce } from '../reducer';
@@ -44,6 +47,7 @@ interface CaboTableProps {
   isHost: boolean;
   initialRoomCode?: string;
   initialPlayerName?: string;
+  initialReconnectToken?: string;
   onExit?: () => void;
 }
 
@@ -55,6 +59,7 @@ export function CaboTable({
   isHost,
   initialRoomCode,
   initialPlayerName,
+  initialReconnectToken,
   onExit,
 }: CaboTableProps) {
   // Host: full authoritative state
@@ -87,6 +92,17 @@ export function CaboTable({
   const [showRules, setShowRules] = React.useState(false);
   const [showScores, setShowScores] = React.useState(false);
 
+  const hostStateRef = React.useRef<CaboState | null>(null);
+  const prevHostStateRef = React.useRef<CaboState | null>(null);
+  React.useEffect(() => {
+    hostStateRef.current = hostState;
+  }, [hostState]);
+
+  const playerIdRef = React.useRef(myPlayerId);
+  const pendingViewsRef = React.useRef<Record<string, CaboStateView> | null>(null);
+  const failoverStateRef = React.useRef<CaboState | null>(null);
+  const hostingRef = React.useRef(isHost);
+
   // ── Online room ────────────────────────────────────────────────────────────
 
   const room = useOnlineRoom({
@@ -94,18 +110,20 @@ export function CaboTable({
     myPlayerId,
 
     onGameState: (rawState) => {
-      if (isHost) return;
-      const data = rawState as { type?: string; views?: Record<string, CaboStateView> };
+      const data = rawState as { type?: string; views?: Record<string, CaboStateView>; hostState?: CaboState };
+      if (data?.hostState) failoverStateRef.current = data.hostState;
+      if (hostingRef.current) return;
       if (data?.type === 'ALL_PLAYER_VIEWS' && data.views) {
-        const view = data.views[myPlayerId];
+        pendingViewsRef.current = data.views;
+        const view = data.views[playerIdRef.current];
         if (view) setMyView(view);
       }
     },
 
     onAction: (rawAction, fromPlayerId) => {
-      if (!isHost || !hostState) return;
+      if (!hostingRef.current || !hostStateRef.current) return;
       const action = rawAction as CaboAction;
-      const validation = validateAction(hostState, action);
+      const validation = validateAction(hostStateRef.current, action);
       if (!validation.valid) {
         console.warn('[Cabo] Invalid action from', fromPlayerId, validation.reason);
         return;
@@ -116,22 +134,42 @@ export function CaboTable({
     onRoomUpdate: (info) => setRoomInfo(info),
     onGameStarted: () => setGameStarted(true),
 
-    onPlayerDisconnected: (peerId) => {
-      if (!isHost || !hostState) return;
-      // Find player by peerId via roomInfo
-      const member = roomInfo?.members.find((m) => m.peerId === peerId);
-      if (member) {
-        hostDispatch({ type: 'PLAYER_DISCONNECTED', playerId: member.id });
+    onPlayerDisconnected: (playerId) => {
+      if (!hostingRef.current || !hostStateRef.current) return;
+      hostDispatch({ type: 'PLAYER_DISCONNECTED', playerId });
+    },
+
+    onPlayerReconnected: (playerId) => {
+      if (!hostingRef.current || !hostStateRef.current) return;
+      hostDispatch({ type: 'PLAYER_RECONNECTED', playerId });
+    },
+
+    onBecameHost: () => {
+      const snapshot = failoverStateRef.current ?? hostStateRef.current;
+      if (snapshot) {
+        prevHostStateRef.current = null;
+        hostDispatch(snapshot);
+        setMyView(getPlayerView(snapshot, playerIdRef.current));
       }
     },
   });
 
-  // ── Host: send private views after state changes ───────────────────────────
-
-  const prevHostStateRef = React.useRef<CaboState | null>(null);
+  playerIdRef.current = room.myPlayerId;
+  const playerId = room.myPlayerId;
+  const hosting = room.isHost;
+  hostingRef.current = hosting;
 
   React.useEffect(() => {
-    if (!isHost || !hostState || !gameStarted || hostState === prevHostStateRef.current) return;
+    const views = pendingViewsRef.current;
+    if (!views) return;
+    const view = views[playerId];
+    if (view) setMyView(view);
+  }, [playerId]);
+
+  // ── Host: send private views after state changes ───────────────────────────
+
+  React.useEffect(() => {
+    if (!hosting || !hostState || !gameStarted || hostState === prevHostStateRef.current) return;
     prevHostStateRef.current = hostState;
 
     // Send each player their private view
@@ -139,7 +177,7 @@ export function CaboTable({
       for (const member of roomInfo.members) {
         const playerView = getPlayerView(hostState, member.id);
 
-        if (member.id === myPlayerId) {
+        if (member.id === playerId) {
           // Host's own view — set directly
           setMyView(playerView);
         } else {
@@ -164,9 +202,9 @@ export function CaboTable({
         allViews[member.id] = getPlayerView(hostState, member.id);
       }
     }
-    room.broadcastState({ type: 'ALL_PLAYER_VIEWS', views: allViews });
+    room.broadcastState({ type: 'ALL_PLAYER_VIEWS', views: allViews, hostState });
 
-  }, [hostState, isHost, gameStarted]);
+  }, [hostState, hosting, gameStarted, playerId]);
 
   // ── On mount ───────────────────────────────────────────────────────────────
 
@@ -179,17 +217,19 @@ export function CaboTable({
       const myName = config?.players.find((p) => p.id === myPlayerId)?.name ?? 'Host';
       room.createRoom(myName);
     } else if (initialRoomCode) {
-      room.joinRoom(initialRoomCode, initialPlayerName ?? 'Player');
+      room.joinRoom(initialRoomCode, initialPlayerName ?? 'Player', {
+        reconnectToken: initialReconnectToken,
+      });
     }
   }, []);
 
   // ── Host: set own view immediately on init ─────────────────────────────────
 
   React.useEffect(() => {
-    if (isHost && hostState && gameStarted) {
-      setMyView(getPlayerView(hostState, myPlayerId));
+    if (hosting && hostState && gameStarted) {
+      setMyView(getPlayerView(hostState, playerId));
     }
-  }, [isHost, gameStarted]);
+  }, [hosting, gameStarted, hostState, playerId]);
 
   // ── Start game (host) ──────────────────────────────────────────────────────
 
@@ -198,8 +238,9 @@ export function CaboTable({
 
     // Rebuild state using actual room member IDs so every device can
     // find itself in state.players via its own myPlayerId.
+    const seated = connectedMembers(roomInfo.members);
     const newConfig: GameConfig = {
-      players: roomInfo.members.map((m, i) => ({
+      players: seated.map((m, i) => ({
         id: m.id,
         name: m.name,
         seat: i,
@@ -210,7 +251,7 @@ export function CaboTable({
     const newState = createInitialState(newConfig);
     prevHostStateRef.current = null;
     hostDispatch(newState);
-    setMyView(getPlayerView(newState, myPlayerId));
+    setMyView(getPlayerView(newState, room.myPlayerId));
     room.broadcastStart();
     setGameStarted(true);
   };
@@ -218,7 +259,7 @@ export function CaboTable({
   // ── Actions ────────────────────────────────────────────────────────────────
 
   const handleAction = React.useCallback((action: CaboAction) => {
-    if (isHost) {
+    if (hosting) {
       if (!hostState) return;
       const validation = validateAction(hostState, action);
       if (!validation.valid) return;
@@ -226,23 +267,26 @@ export function CaboTable({
     } else {
       room.sendAction(action);
     }
-  }, [isHost, hostState]);
+  }, [hosting, hostState]);
 
   // ── Waiting Room ───────────────────────────────────────────────────────────
 
   if (!gameStarted || !myView) {
     return (
-      <CaboWaitingRoom
-        isHost={isHost}
+      <>
+        <HostTransferOverlay visible={room.status === "transferring"} />
+        <CaboWaitingRoom
+          isHost={hosting}
         roomCode={room.roomCode}
         roomInfo={roomInfo}
         status={room.status}
         error={room.error}
-        myPlayerId={myPlayerId}
+        myPlayerId={playerId}
         expectedCount={config?.players.length ?? 2}
         onStart={handleStartGame}
         onExit={onExit}
       />
+      </>
     );
   }
 
@@ -250,17 +294,20 @@ export function CaboTable({
 
   if (myView.phase === 'GAME_OVER') {
     return (
-      <GameOverScreen
+      <>
+        <HostTransferOverlay visible={room.status === "transferring"} />
+        <GameOverScreen
         view={myView}
-        myPlayerId={myPlayerId}
+        myPlayerId={playerId}
         onPlayAgain={() => {
-          if (isHost && hostState) {
+          if (hosting && hostState) {
             const nextState = reduce(hostState, { type: 'START_NEXT_ROUND' });
             hostDispatch(null); // reset
           }
         }}
         onExit={onExit}
       />
+      </>
     );
   }
 
@@ -268,29 +315,36 @@ export function CaboTable({
 
   if (myView.phase === 'ROUND_SCORE') {
     return (
-      <RoundScoreScreen
-        view={myView}
-        myPlayerId={myPlayerId}
-        isHost={isHost}
-        onNextRound={() => handleAction({ type: 'START_NEXT_ROUND' })}
-      />
+      <>
+        <HostTransferOverlay visible={room.status === "transferring"} />
+        <RoundScoreScreen
+          view={myView}
+          myPlayerId={playerId}
+          isHost={hosting}
+          onNextRound={() => handleAction({ type: 'START_NEXT_ROUND' })}
+        />
+      </>
     );
   }
 
   // ── Main Game Table ────────────────────────────────────────────────────────
 
   return (
-    <GameTableLayout
-      view={myView}
-      myPlayerId={myPlayerId}
-      selectedSlotId={selectedSlotId}
-      setSelectedSlotId={setSelectedSlotId}
-      onAction={handleAction}
-      snapResult={snapResult}
-      roomCode={room.roomCode}
-      isHost={isHost}
-      onExit={onExit}
-    />
+    <>
+      <HostTransferOverlay visible={room.status === "transferring"} />
+      <GameTableLayout
+        view={myView}
+        myPlayerId={playerId}
+        selectedSlotId={selectedSlotId}
+        setSelectedSlotId={setSelectedSlotId}
+        onAction={handleAction}
+        snapResult={snapResult}
+        roomCode={room.roomCode}
+        roomInfo={roomInfo}
+        isHost={hosting}
+        onExit={onExit}
+      />
+    </>
   );
 }
 
@@ -332,6 +386,7 @@ function GameTableLayout({
   onAction,
   snapResult,
   roomCode,
+  roomInfo,
   isHost,
   onExit,
 }: {
@@ -342,6 +397,7 @@ function GameTableLayout({
   onAction: (action: CaboAction) => void;
   snapResult: { result: 'SUCCESS_OWN' | 'SUCCESS_OTHER' | 'FAILURE'; winnerId: string; winnerName: string } | null;
   roomCode: string | null;
+  roomInfo: RoomInfo | null;
   isHost: boolean;
   onExit?: () => void;
 }) {
@@ -503,12 +559,17 @@ function GameTableLayout({
     const disconnectedPlayer = view.allPlayers.find((p) => p.id === view.pausedByDisconnect);
     return (
       <div className="fixed inset-0 flex items-center justify-center bg-black/80 z-50">
-        <div className="bg-[rgb(var(--color-surface))] rounded-2xl p-8 flex flex-col items-center gap-4 max-w-xs text-center shadow-modal">
+        <div className="bg-[rgb(var(--color-surface))] rounded-2xl p-8 flex flex-col items-center gap-4 max-w-sm text-center shadow-modal">
           <span className="text-4xl">📡</span>
           <h2 className="text-xl font-bold text-[rgb(var(--color-text))]">Player Disconnected</h2>
           <p className="text-[rgb(var(--color-text-muted))] text-sm">
-            {disconnectedPlayer?.name ?? 'A player'} has disconnected. Waiting for them to reconnect...
+            {disconnectedPlayer?.name ?? 'A player'} left. Share the rejoin code so they can sit back down in the same seat.
           </p>
+          <DisconnectedPlayersNotice
+            members={roomInfo?.members}
+            roomCode={roomCode}
+            className="text-left w-full"
+          />
           <div className="flex gap-2">
             <div className="w-2 h-2 rounded-full bg-[rgb(var(--color-primary))] animate-bounce" style={{ animationDelay: '0ms' }} />
             <div className="w-2 h-2 rounded-full bg-[rgb(var(--color-primary))] animate-bounce" style={{ animationDelay: '150ms' }} />
@@ -1159,7 +1220,7 @@ function CaboWaitingRoom({
   onExit,
 }: CaboWaitingRoomProps) {
   const [copied, setCopied] = React.useState(false);
-  const joinedCount = roomInfo?.members.length ?? 0;
+  const joinedCount = connectedMembers(roomInfo?.members).length;
   const canStart = isHost && joinedCount >= caboFacts.minPlayers && joinedCount <= expectedCount;
 
   const copyCode = () => {
@@ -1232,8 +1293,13 @@ function CaboWaitingRoom({
                 key={m.id}
                 className="flex items-center gap-3 px-4 py-3 bg-[rgb(var(--color-surface-raised))] rounded-xl border border-[rgb(var(--color-border))]"
               >
-                <div className={cn('w-2 h-2 rounded-full', m.connected !== false ? 'bg-green-400' : 'bg-red-400')} />
-                <span className="text-sm font-medium text-[rgb(var(--color-text))] flex-1">{m.name}</span>
+                <div className={cn('w-2 h-2 rounded-full', isMemberConnected(m) ? 'bg-green-400' : 'bg-red-400')} />
+                <span className="text-sm font-medium text-[rgb(var(--color-text))] flex-1">
+                  {m.name}
+                  {!isMemberConnected(m) && (
+                    <span className="ml-2 text-[10px] text-red-400 uppercase">away</span>
+                  )}
+                </span>
                 {m.role === 'host' && (
                   <span className="text-[10px] text-[rgb(var(--color-text-muted))] bg-[rgb(var(--color-border))] px-2 py-0.5 rounded-full">
                     host
@@ -1241,6 +1307,10 @@ function CaboWaitingRoom({
                 )}
               </div>
             ))}
+            <DisconnectedPlayersNotice
+              members={roomInfo.members}
+              roomCode={roomCode}
+            />
           </div>
         )}
 

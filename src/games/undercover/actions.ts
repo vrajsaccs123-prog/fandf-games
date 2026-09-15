@@ -27,6 +27,8 @@ export type UndercoverAction =
   // ─── Voting ──────────────────────────────────────────────────────────────
   /** Online: current voter locks in their vote for a target. */
   | { type: "SUBMIT_VOTE"; voterId: string; targetId: string }
+  /** Living Judge casts one extra vote among tied leaders. */
+  | { type: "JUDGE_DECISION"; judgeId: string; targetId: string }
   /** Offline: host picks who gets eliminated (after verbal discussion). */
   | { type: "ADMIN_ELIMINATE"; targetId: string }
   /** Confirm the pending elimination (online: after all votes tallied). */

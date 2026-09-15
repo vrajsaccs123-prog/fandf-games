@@ -21,6 +21,9 @@ import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/Button";
 import { useOnlineRoom } from "@/hooks/useOnlineRoom";
 import type { RoomInfo } from "@/lib/online/types";
+import { connectedMembers, isMemberConnected } from "@/lib/online/reconnectCode";
+import { DisconnectedPlayersNotice, ConnectionDot } from "@/components/online/DisconnectedPlayersNotice";
+import { HostTransferOverlay } from "@/components/online/HostTransferOverlay";
 import type { GameConfig } from "@/game/core/types";
 import { modernArtFacts } from "../rules";
 import { formatPlayerRange, isPlayerCountAllowed } from "@/game/core/rulesFacts";
@@ -44,6 +47,8 @@ export interface ModernArtTableOnlineProps {
   initialRoomCode?: string;
   /** Joining player: display name */
   initialPlayerName?: string;
+  /** Seat token from a shared rejoin code */
+  initialReconnectToken?: string;
   onExit?: () => void;
 }
 
@@ -55,6 +60,7 @@ export function ModernArtTableOnline({
   myPlayerId,
   initialRoomCode,
   initialPlayerName,
+  initialReconnectToken,
   onExit,
 }: ModernArtTableOnlineProps) {
   // ── State — null until game starts ────────────────────────────────────────
@@ -82,6 +88,7 @@ export function ModernArtTableOnline({
   const [gameStarted, setGameStarted] = React.useState(false);
   /** Host-only: Mystery Player toggle (only matters for 3-player games) */
   const [mysteryEnabled, setMysteryEnabled] = React.useState(false);
+  const hostingRef = React.useRef(isHost);
 
   // ── Online room ────────────────────────────────────────────────────────────
 
@@ -90,13 +97,11 @@ export function ModernArtTableOnline({
     myPlayerId,
 
     onGameState: (rawState) => {
-      // Received full authoritative state from host → replace local copy
       dispatch(rawState as ModernArtState);
     },
 
     onAction: (rawAction, fromPlayerId) => {
-      // Host receives a player's action → validate + apply → broadcast
-      if (!isHost) return;
+      if (!hostingRef.current) return;
       const action = rawAction as ModernArtAction;
       const currentState = stateRef.current;
       if (!currentState) return;
@@ -113,15 +118,18 @@ export function ModernArtTableOnline({
     onGameStarted: () => setGameStarted(true),
   });
 
+  const hosting = room.isHost;
+  hostingRef.current = hosting;
+
   // ── Broadcast after every host state change ────────────────────────────────
 
   const prevStateRef = React.useRef<ModernArtState | null>(null);
   React.useEffect(() => {
-    if (!isHost || !state || state === prevStateRef.current) return;
+    if (!hosting || !state || state === prevStateRef.current) return;
     prevStateRef.current = state;
     room.broadcastState(state);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, isHost]);
+  }, [state, hosting]);
 
   // ── On mount: create or join room ─────────────────────────────────────────
 
@@ -132,7 +140,9 @@ export function ModernArtTableOnline({
     if (isHost) {
       room.createRoom(hostName ?? "Host");
     } else if (initialRoomCode) {
-      room.joinRoom(initialRoomCode, initialPlayerName ?? "Player");
+      room.joinRoom(initialRoomCode, initialPlayerName ?? "Player", {
+        reconnectToken: initialReconnectToken,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -141,9 +151,10 @@ export function ModernArtTableOnline({
 
   function handleStartGame() {
     if (!roomInfo) return;
-    const playerCount = roomInfo.members.length;
+    const seated = connectedMembers(roomInfo.members);
+    const playerCount = seated.length;
     const config: GameConfig = {
-      players: roomInfo.members.map((m, i) => ({
+      players: seated.map((m, i) => ({
         id: m.id,
         name: m.name,
         seat: i,
@@ -165,7 +176,7 @@ export function ModernArtTableOnline({
   // ── Rematch (host rebuilds state with same players) ────────────────────────
 
   function handleRematch() {
-    if (!roomInfo || !isHost) return;
+    if (!roomInfo || !hosting) return;
     const playerCount = roomInfo.members.length;
     const config: GameConfig = {
       players: roomInfo.members.map((m, i) => ({
@@ -188,26 +199,24 @@ export function ModernArtTableOnline({
 
   const handleAction = React.useCallback(
     (action: ModernArtAction) => {
-      if (isHost) {
-        // Host validates and applies locally; useEffect broadcasts to peers
-        // We can't read the latest state here safely in the callback; use dispatch
-        // The reducer handles validation through the engine
+      if (hosting) {
         dispatch(action);
       } else {
-        // Non-host: send to host for validation
         room.sendAction(action);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isHost]
+    [hosting]
   );
 
   // ── Waiting Room ──────────────────────────────────────────────────────────
 
   if (!gameStarted || !state) {
     return (
-      <WaitingRoom
-        isHost={isHost}
+      <>
+        <HostTransferOverlay visible={room.status === "transferring"} />
+        <WaitingRoom
+          isHost={hosting}
         roomCode={room.roomCode}
         roomInfo={roomInfo}
         status={room.status}
@@ -217,21 +226,32 @@ export function ModernArtTableOnline({
         onStart={handleStartGame}
         onExit={onExit}
       />
+      </>
     );
   }
 
   // ── Game Surface ──────────────────────────────────────────────────────────
 
-  const maskedState = getMaskedStateForPlayer(state, myPlayerId);
+  const maskedState = getMaskedStateForPlayer(state, room.myPlayerId);
 
   return (
-    <ModernArtGame
-      state={maskedState}
-      myPlayerId={myPlayerId}
-      onAction={handleAction}
-      onExit={onExit}
-      onRematch={isHost ? handleRematch : undefined}
-    />
+    <div className="relative">
+      <HostTransferOverlay visible={room.status === "transferring"} />
+      <div className="fixed top-3 left-1/2 -translate-x-1/2 z-40 w-[min(24rem,calc(100%-1.5rem))]">
+        <DisconnectedPlayersNotice
+          members={roomInfo?.members}
+          roomCode={room.roomCode}
+          compact
+        />
+      </div>
+      <ModernArtGame
+        state={maskedState}
+        myPlayerId={room.myPlayerId}
+        onAction={handleAction}
+        onExit={onExit}
+        onRematch={hosting ? handleRematch : undefined}
+      />
+    </div>
   );
 }
 
@@ -260,7 +280,7 @@ function WaitingRoom({
   onStart,
   onExit,
 }: WaitingRoomProps) {
-  const joinedCount = roomInfo?.members.length ?? 0;
+  const joinedCount = connectedMembers(roomInfo?.members).length;
   const canStart = isHost && isPlayerCountAllowed(modernArtFacts, joinedCount);
   const show3PlayerOption = isHost && joinedCount === 3;
 
@@ -344,13 +364,19 @@ function WaitingRoom({
                 key={m.id}
                 className="flex items-center gap-3 px-4 py-3 bg-[rgb(var(--color-surface-raised))] rounded-xl border border-[rgb(var(--color-border))]"
               >
+                <ConnectionDot connected={isMemberConnected(m)} />
                 <div
                   className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white shrink-0"
                   style={{ backgroundColor: `hsl(${(i * 60 + 30) % 360}, 50%, 40%)` }}
                 >
                   {m.name[0].toUpperCase()}
                 </div>
-                <span className="text-sm font-medium flex-1">{m.name}</span>
+                <span className="text-sm font-medium flex-1">
+                  {m.name}
+                  {!isMemberConnected(m) && (
+                    <span className="ml-2 text-[10px] text-red-400 uppercase">away</span>
+                  )}
+                </span>
                 {m.id === roomInfo.hostId && (
                   <span className="text-[10px] text-[rgb(var(--color-text-muted))] bg-[rgb(var(--color-surface-sunken))] px-2 py-0.5 rounded-full border border-[rgb(var(--color-border))]">
                     host
@@ -363,6 +389,10 @@ function WaitingRoom({
                 Need at least {modernArtFacts.minPlayers} players to start
               </p>
             )}
+            <DisconnectedPlayersNotice
+              members={roomInfo.members}
+              roomCode={roomCode}
+            />
           </div>
         )}
 

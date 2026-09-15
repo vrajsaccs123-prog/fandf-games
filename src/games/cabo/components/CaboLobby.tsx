@@ -14,6 +14,10 @@ import { Surface } from '@/components/ui/Surface';
 import { useGameSessionStore } from '@/stores/gameSessionStore';
 import { caboFacts } from '../rules';
 import { defaultPlayerCount, playerCountOptions } from '@/game/core/rulesFacts';
+import {
+  formatJoinCodeInput,
+  joinPayloadFromInput,
+} from '@/lib/online/reconnectCode';
 
 export function CaboLobby() {
   const router = useRouter();
@@ -50,16 +54,18 @@ export function CaboLobby() {
   };
 
   const handleJoin = () => {
-    const code = joinCode.trim().toUpperCase();
-    if (!code || code.length !== 6) { setError('Enter a valid 6-letter room code'); return; }
-    if (!joinName.trim()) { setError('Enter your name'); return; }
+    const payload = joinPayloadFromInput(joinCode);
+    if (!payload) { setError('Enter a valid room code or rejoin code'); return; }
+    const isRejoin = Boolean(payload.reconnectToken);
+    if (!isRejoin && !joinName.trim()) { setError('Enter your name'); return; }
 
     const playerId = `player-${Math.random().toString(36).slice(2, 8)}`;
     setCabo({
       type: 'online-join',
       playerId,
-      roomCode: code,
-      playerName: joinName.trim(),
+      roomCode: payload.roomCode,
+      playerName: joinName.trim() || 'Guest',
+      reconnectToken: payload.reconnectToken,
     });
     router.push('/games/cabo/play');
   };
@@ -151,12 +157,12 @@ export function CaboLobby() {
           <h3 className="text-sm font-semibold text-[rgb(var(--color-text))]">Join Game</h3>
 
           <div className="flex flex-col gap-1">
-            <label className="text-xs text-[rgb(var(--color-text-muted))]">Room code</label>
+            <label className="text-xs text-[rgb(var(--color-text-muted))]">Room or rejoin code</label>
             <input
               value={joinCode}
-              onChange={(e) => { setJoinCode(e.target.value.toUpperCase()); setError(null); }}
-              placeholder="Enter 6-letter code"
-              maxLength={6}
+              onChange={(e) => { setJoinCode(formatJoinCodeInput(e.target.value)); setError(null); }}
+              placeholder="A3K7P2 or A3K7P2-K9M4"
+              maxLength={11}
               className={cn(
                 'w-full px-3 py-2 rounded-lg text-sm font-mono tracking-widest',
                 'bg-[rgb(var(--color-surface-sunken))] border border-[rgb(var(--color-border))]',
@@ -164,6 +170,9 @@ export function CaboLobby() {
                 'focus:outline-none focus:border-[rgb(var(--color-primary))]',
               )}
             />
+            <p className="text-[10px] text-[rgb(var(--color-text-muted))]">
+              Disconnected? Use the rejoin code your friends share to reclaim your seat.
+            </p>
           </div>
 
           <div className="flex flex-col gap-1">
@@ -188,7 +197,7 @@ export function CaboLobby() {
               Back
             </Button>
             <Button fullWidth onClick={handleJoin}>
-              Join Room
+              {joinPayloadFromInput(joinCode)?.reconnectToken ? 'Rejoin Game' : 'Join Room'}
             </Button>
           </div>
         </div>

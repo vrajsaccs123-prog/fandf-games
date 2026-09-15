@@ -91,7 +91,7 @@ function OfflineLobby({ onGoOnline }: { onGoOnline: () => void }) {
     settings: {
       totalPlayers: DEFAULT_PLAYER_COUNT,
       ...initialDefaults,
-      difficulty: "medium",
+      difficulty: "easy",
       specialCharacters: {
         judge: false, joyFool: false, ghost: false,
         lovers: false, revenger: false, duelists: false,
@@ -142,7 +142,8 @@ function OfflineLobby({ onGoOnline }: { onGoOnline: () => void }) {
 
   function startGame(
     players?: Array<{ id: string; name: string; seat: number; isHuman: boolean }>,
-    difficultyOverride?: WordDifficulty
+    difficultyOverride?: WordDifficulty,
+    specialCharactersOverride?: SpecialCharacterSettings
   ) {
     const resolvedPlayers = players ?? buildPlayers();
     if (resolvedPlayers.length === 0) return;
@@ -155,7 +156,7 @@ function OfflineLobby({ onGoOnline }: { onGoOnline: () => void }) {
         undercovers: setup.settings.undercovers,
         mrWhites: setup.settings.mrWhites,
         difficulty: difficultyOverride ?? setup.settings.difficulty,
-        specialCharacters: setup.settings.specialCharacters,
+        specialCharacters: specialCharactersOverride ?? setup.settings.specialCharacters,
       },
     });
 
@@ -186,18 +187,25 @@ function OfflineLobby({ onGoOnline }: { onGoOnline: () => void }) {
     return next;
   }
 
-  function handlePlayAgain(difficulty?: WordDifficulty) {
+  function handlePlayAgain(difficulty?: WordDifficulty, specialCharacters?: SpecialCharacterSettings) {
     const newCumulative = accumulateScores();
     setCumulativeScores(newCumulative);
     setGamesPlayed((g) => g + 1);
-    if (difficulty) {
-      setSetup((s) => ({ ...s, settings: { ...s.settings, difficulty } }));
+    if (difficulty || specialCharacters) {
+      setSetup((s) => ({
+        ...s,
+        settings: {
+          ...s.settings,
+          ...(difficulty ? { difficulty } : {}),
+          ...(specialCharacters ? { specialCharacters } : {}),
+        },
+      }));
     }
-    // Restart with the same players and (optionally updated) difficulty
+    // Restart with the same players and (optionally updated) next-game settings
     const players = sessionPlayers.length > 0
       ? sessionPlayers.map((p, i) => ({ ...p, seat: i, isHuman: true }))
       : buildPlayers();
-    startGame(players, difficulty);
+    startGame(players, difficulty, specialCharacters);
   }
 
   function handleEndSession() {

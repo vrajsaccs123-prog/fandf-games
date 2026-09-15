@@ -101,6 +101,18 @@ export interface CodenamesState {
   /** Human-readable explanation of how the game ended */
   winReason: string | null;
 
+  /**
+   * Seconds allowed for each clue-giving and guessing phase.
+   * Null when the host left the timer off.
+   */
+  timerSeconds: number | null;
+
+  /**
+   * Host clock timestamp when the current phase (clue or guess) started.
+   * Null when the timer is off.
+   */
+  phaseStartedAt: number | null;
+
   events: GameEvent[];
   seed: string;
 }

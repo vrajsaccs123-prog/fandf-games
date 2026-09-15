@@ -56,7 +56,7 @@ export function getRules(): GameRules {
       {
         title: "Guessing",
         content:
-          "Teammates discuss and touch (tap) one card at a time. You may guess up to (clue number + 1) cards per turn. You may also pass (end your turn) at any time after making at least one guess.",
+          "Teammates discuss and tap cards to highlight candidates, then tap a highlighted card again to guess it. You may guess up to (clue number + 1) cards per turn. You may also pass (end your turn) at any time after making at least one guess.",
         items: [
           "Correct guess (your team's card): card is revealed, keep guessing.",
           "Wrong guess (neutral card): turn ends immediately.",
@@ -67,7 +67,12 @@ export function getRules(): GameRules {
       {
         title: "Turn End",
         content:
-          "A team's turn ends when they make a wrong guess, run out of guesses, or voluntarily pass. The other team then takes their turn.",
+          "A team's turn ends when they make a wrong guess, run out of guesses, voluntarily pass, or run out of time if a round timer is on. The other team then takes their turn.",
+      },
+      {
+        title: "Round Timer",
+        content:
+          "The host may turn on a round timer when starting the game and choose a duration from 30 seconds to 3 minutes. That limit applies separately to each clue-giving round and each guessing round. When the timer hits zero, the current round ends immediately and the other team begins giving a clue, with the timer restarting.",
       },
     ],
 
@@ -99,6 +104,11 @@ export function getRules(): GameRules {
         content:
           "If you accidentally reveal your opponent's card, it counts toward their total — they may win early if it was their last card!",
       },
+      {
+        title: "Optional Round Timer",
+        content:
+          "When enabled, both the Spymaster and the operatives have the same time limit each round. A clue-giving timeout skips that team's guesses entirely.",
+      },
     ],
 
     glossary: [
@@ -124,7 +134,7 @@ export function getRules(): GameRules {
       {
         term: "Contact",
         definition:
-          "Revealing a card by tapping it. Once contacted, a card stays revealed.",
+          "Revealing a card by tapping a highlighted card a second time. Once contacted, a card stays revealed.",
       },
     ],
   };

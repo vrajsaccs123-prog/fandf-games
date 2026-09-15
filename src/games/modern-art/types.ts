@@ -76,12 +76,24 @@ export interface ArtistRanking {
 
 // ─── Auction States ───────────────────────────────────────────────────────────
 
+/** Auctioneer cannot hammer down until this many ms after the open auction starts. */
+export const OPEN_AUCTION_MIN_DURATION_MS = 10_000;
+
+export function openAuctionLockRemainingMs(
+  openedAt: number,
+  now = Date.now()
+): number {
+  return Math.max(0, openedAt + OPEN_AUCTION_MIN_DURATION_MS - now);
+}
+
 export interface OpenAuctionState {
   type: "open";
   paintingIds: string[];
   auctioneerId: string;
   currentHighestBid: number;
   currentHighestBidderId: string | null;
+  /** Host clock timestamp when this open auction started. */
+  openedAt: number;
 }
 
 export interface OneOfferAuctionState {

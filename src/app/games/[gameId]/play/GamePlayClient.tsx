@@ -142,6 +142,7 @@ export function GamePlayClient({ gameId }: GamePlayClientProps) {
           isHost={false}
           initialRoomCode={blackjack.roomCode}
           initialPlayerName={blackjack.playerName}
+          initialReconnectToken={blackjack.reconnectToken}
           onExit={handleExit}
         />
       );
@@ -178,6 +179,7 @@ export function GamePlayClient({ gameId }: GamePlayClientProps) {
           myPlayerId={modernArt.playerId}
           initialRoomCode={modernArt.roomCode}
           initialPlayerName={modernArt.playerName}
+          initialReconnectToken={modernArt.reconnectToken}
           onExit={handleExit}
         />
       );
@@ -204,6 +206,7 @@ export function GamePlayClient({ gameId }: GamePlayClientProps) {
           isHost={false}
           initialRoomCode={cabo.roomCode}
           initialPlayerName={cabo.playerName}
+          initialReconnectToken={cabo.reconnectToken}
           onExit={handleExit}
         />
       );

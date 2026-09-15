@@ -10,4 +10,6 @@ export type CodenamesAction =
   /** Operative reveals a card on the board */
   | { type: "GUESS_CARD"; playerId: string; cardId: number }
   /** Operative chooses to end their team's turn early */
-  | { type: "END_TURN"; playerId: string };
+  | { type: "END_TURN"; playerId: string }
+  /** Round timer ran out — skip to the other team's clue-giving turn */
+  | { type: "TIMER_EXPIRED" };

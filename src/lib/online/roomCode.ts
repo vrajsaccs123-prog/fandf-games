@@ -6,12 +6,12 @@
  */
 
 // No 0, O, I, 1 to avoid confusion when sharing
-const CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export const ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 export function generateRoomCode(): string {
   return Array.from(
     { length: 6 },
-    () => CHARS[Math.floor(Math.random() * CHARS.length)]
+    () => ROOM_CODE_CHARS[Math.floor(Math.random() * ROOM_CODE_CHARS.length)]
   ).join("");
 }
 

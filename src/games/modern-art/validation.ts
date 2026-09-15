@@ -13,6 +13,7 @@ import {
   OneOfferAuctionState,
   HiddenAuctionState,
   FixedPriceAuctionState,
+  openAuctionLockRemainingMs,
 } from "./types";
 
 function ok(): ValidationResult { return { valid: true }; }
@@ -87,6 +88,9 @@ export function validateAction(
       const auction = state.auction as OpenAuctionState;
       if (action.playerId !== auction.auctioneerId)
         return fail("Only the Auctioneer can close the auction.");
+      const lockMs = openAuctionLockRemainingMs(auction.openedAt);
+      if (lockMs > 0)
+        return fail("The auction must stay open for at least 10 seconds.");
       return ok();
     }
 
@@ -266,7 +270,10 @@ export function getAvailableActions(
           actions.push({ type: "OPEN_BID", playerId, amount });
         }
       }
-      if (auction.auctioneerId === playerId) {
+      if (
+        auction.auctioneerId === playerId &&
+        openAuctionLockRemainingMs(auction.openedAt) <= 0
+      ) {
         actions.push({ type: "CLOSE_OPEN_AUCTION", playerId });
       }
       break;

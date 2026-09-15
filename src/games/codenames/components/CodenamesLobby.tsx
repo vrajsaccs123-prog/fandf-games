@@ -17,8 +17,10 @@ import { createInitialState } from "../state";
 import { reduce } from "../reducer";
 import { CodenamesGame } from "./CodenamesGame";
 import { CodenamesOnline } from "./CodenamesOnline";
+import { TimerSettings } from "./TimerSettings";
 import type { CodenamesAction } from "../actions";
 import { codenamesFacts } from "../rules";
+import { TIMER_DEFAULT_SECONDS } from "../timer";
 import { clampPlayerCount, defaultPlayerCount, formatPlayerRange } from "@/game/core/rulesFacts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -37,6 +39,8 @@ interface LocalSetupState {
   playerCount: number;
   teams: Record<string, TeamSlot>;
   spymasters: { red: string; blue: string };
+  timerEnabled: boolean;
+  timerSeconds: number;
 }
 
 const STEPS = ["Players", "Teams", "Spymasters", "Ready"];
@@ -127,6 +131,8 @@ function LocalLobby({ onExit }: { onExit: () => void }) {
     playerNames: Array(defaultPlayerCount(codenamesFacts)).fill(""),
     teams: {},
     spymasters: { red: "", blue: "" },
+    timerEnabled: false,
+    timerSeconds: TIMER_DEFAULT_SECONDS,
   });
 
   const [gameState, setGameState] = React.useState<CodenamesState | null>(null);
@@ -215,7 +221,11 @@ function LocalLobby({ onExit }: { onExit: () => void }) {
     });
     const config = {
       players: players.map((p, i) => ({ id: p.id, name: p.name, seat: i, isHuman: true })),
-      options: { teams: finalTeams, spymasters: setup.spymasters },
+      options: {
+        teams: finalTeams,
+        spymasters: setup.spymasters,
+        timerSeconds: setup.timerEnabled ? setup.timerSeconds : null,
+      },
     };
     setGameState(createInitialState(config));
   }
@@ -232,7 +242,7 @@ function LocalLobby({ onExit }: { onExit: () => void }) {
   // ── Active Game ────────────────────────────────────────────────────────────
   if (gameState) {
     return (
-      <div className="fixed inset-0 z-[var(--z-game)] bg-[#0d2b0d] overflow-y-auto">
+      <div className="fixed inset-0 z-[var(--z-game)] bg-[#3a1f0d] overflow-y-auto">
         <CodenamesGame
           state={gameState}
           onAction={handleAction}
@@ -324,6 +334,14 @@ function LocalLobby({ onExit }: { onExit: () => void }) {
               players={setupPlayers}
               teams={setup.teams}
               spymasters={setup.spymasters}
+              timerEnabled={setup.timerEnabled}
+              timerSeconds={setup.timerSeconds}
+              onTimerEnabledChange={(enabled) =>
+                setSetup((s) => ({ ...s, timerEnabled: enabled }))
+              }
+              onTimerSecondsChange={(seconds) =>
+                setSetup((s) => ({ ...s, timerSeconds: seconds }))
+              }
             />
           )}
         </motion.div>
@@ -635,8 +653,16 @@ function SpymasterPicker({
 // ─── Step 3: Review ───────────────────────────────────────────────────────────
 
 function ReviewStep({
-  players, teams, spymasters,
-}: { players: SetupPlayer[]; teams: Record<string, TeamSlot>; spymasters: { red: string; blue: string } }) {
+  players, teams, spymasters, timerEnabled, timerSeconds, onTimerEnabledChange, onTimerSecondsChange,
+}: {
+  players: SetupPlayer[];
+  teams: Record<string, TeamSlot>;
+  spymasters: { red: string; blue: string };
+  timerEnabled: boolean;
+  timerSeconds: number;
+  onTimerEnabledChange: (enabled: boolean) => void;
+  onTimerSecondsChange: (seconds: number) => void;
+}) {
   const redPlayers  = players.filter((p) => teams[p.id] === "red");
   const bluePlayers = players.filter((p) => teams[p.id] === "blue");
   const redSpy  = players.find((p) => p.id === spymasters.red);
@@ -672,6 +698,12 @@ function ReviewStep({
         {renderTeam("red", redPlayers, redSpy)}
         {renderTeam("blue", bluePlayers, blueSpy)}
       </div>
+      <TimerSettings
+        enabled={timerEnabled}
+        seconds={timerSeconds}
+        onEnabledChange={onTimerEnabledChange}
+        onSecondsChange={onTimerSecondsChange}
+      />
       <div className="p-3 bg-amber-500/10 rounded-lg text-xs text-amber-700 dark:text-amber-300">
         💡 The starting team (9 cards) is chosen randomly — they get one extra card to find.
       </div>

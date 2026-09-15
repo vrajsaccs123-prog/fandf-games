@@ -57,8 +57,8 @@ export function validateAction(
       if (state.phase !== "voting") {
         return { valid: false, reason: "Not in the voting phase." };
       }
-      // Can't vote once pendingElimination is set (all votes in)
-      if (state.pendingElimination) {
+      // Can't vote once pendingElimination is set (all votes in) or Judge is breaking a tie
+      if (state.pendingElimination || state.pendingJudgeDecision) {
         return { valid: false, reason: "Voting is already complete." };
       }
       if (action.voterId === action.targetId) {
@@ -85,6 +85,23 @@ export function validateAction(
       return { valid: true };
     }
 
+    case "JUDGE_DECISION": {
+      if (state.phase !== "voting" || !state.pendingJudgeDecision) {
+        return { valid: false, reason: "The Judge is not breaking a tie." };
+      }
+      if (state.pendingJudgeDecision !== action.judgeId) {
+        return { valid: false, reason: "You are not the Judge." };
+      }
+      if (!state.voteResult?.leaders.includes(action.targetId)) {
+        return { valid: false, reason: "The Judge must choose a tied player." };
+      }
+      const target = state.players.find((p) => p.id === action.targetId);
+      if (!target || target.isEliminated) {
+        return { valid: false, reason: "Invalid target." };
+      }
+      return { valid: true };
+    }
+
     case "ADMIN_ELIMINATE": {
       if (state.mode !== "offline") {
         return { valid: false, reason: "Admin elimination is only available in offline mode." };
@@ -107,7 +124,10 @@ export function validateAction(
     }
 
     case "REQUEST_REVOTE": {
-      if (state.phase !== "voting" || !state.pendingElimination) {
+      if (
+        state.phase !== "voting" ||
+        (!state.pendingElimination && !state.pendingJudgeDecision)
+      ) {
         return { valid: false, reason: "No completed vote to redo." };
       }
       return { valid: true };

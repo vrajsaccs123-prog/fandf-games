@@ -8,6 +8,7 @@
 
 import type { CodenamesState, Team, WordCard } from "./types";
 import type { CodenamesAction } from "./actions";
+import { isTimerElapsed } from "./timer";
 
 // ─── Reducer ──────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,8 @@ export function reduce(
       return handleGuessCard(state, action.playerId, action.cardId);
     case "END_TURN":
       return handleEndTurn(state);
+    case "TIMER_EXPIRED":
+      return handleTimerExpired(state);
     default:
       return state;
   }
@@ -60,6 +63,7 @@ function handleGiveClue(
     phase: "guessing",
     currentClue: { word: trimmedClue, count },
     guessesRemaining,
+    phaseStartedAt: restartPhaseClock(state),
     clueHistory: [...state.clueHistory, clueEntry],
     events: [
       ...state.events,
@@ -210,7 +214,29 @@ function handleEndTurn(state: CodenamesState): CodenamesState {
   return switchTeam(state);
 }
 
+function handleTimerExpired(state: CodenamesState): CodenamesState {
+  if (state.phase !== "giving_clue" && state.phase !== "guessing") return state;
+  if (!isTimerElapsed(state)) return state;
+
+  return switchTeam({
+    ...state,
+    events: [
+      ...state.events,
+      {
+        type: "TIMER_EXPIRED",
+        payload: { team: state.currentTeam, phase: state.phase },
+        turn: state.turn,
+        timestamp: Date.now(),
+      },
+    ],
+  });
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function restartPhaseClock(state: CodenamesState): number | null {
+  return state.timerSeconds != null ? Date.now() : null;
+}
 
 function switchTeam(state: CodenamesState): CodenamesState {
   const nextTeam: Team = state.currentTeam === "red" ? "blue" : "red";
@@ -221,6 +247,7 @@ function switchTeam(state: CodenamesState): CodenamesState {
     turn: state.turn + 1,
     currentClue: null,
     guessesRemaining: 0,
+    phaseStartedAt: restartPhaseClock(state),
     events: [
       ...state.events,
       {

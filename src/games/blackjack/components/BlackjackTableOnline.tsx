@@ -39,6 +39,9 @@ import { DealerArea } from "./DealerArea";
 import { PlayerArea } from "./PlayerArea";
 import { useOnlineRoom } from "@/hooks/useOnlineRoom";
 import type { RoomInfo } from "@/lib/online/types";
+import { connectedMembers, isMemberConnected } from "@/lib/online/reconnectCode";
+import { DisconnectedPlayersNotice, ConnectionDot } from "@/components/online/DisconnectedPlayersNotice";
+import { HostTransferOverlay } from "@/components/online/HostTransferOverlay";
 import { RulesDrawer, RulesHelpButton, useRulesHelp } from "@/components/game/RulesDrawer";
 import { blackjackHelp } from "../help";
 
@@ -51,6 +54,7 @@ interface BlackjackTableOnlineProps {
   isHost: boolean;
   initialRoomCode?: string;
   initialPlayerName?: string;
+  initialReconnectToken?: string;
   onExit?: () => void;
 }
 
@@ -65,6 +69,7 @@ export function BlackjackTableOnline({
   isHost,
   initialRoomCode,
   initialPlayerName,
+  initialReconnectToken,
   onExit,
 }: BlackjackTableOnlineProps) {
   const { open: rulesOpen, openRules, closeRules } = useRulesHelp();
@@ -83,6 +88,7 @@ export function BlackjackTableOnline({
 
   const [roomInfo, setRoomInfo] = React.useState<RoomInfo | null>(null);
   const [gameStarted, setGameStarted] = React.useState(false);
+  const hostingRef = React.useRef(isHost);
 
   // ── Online room ────────────────────────────────────────────────────────────
 
@@ -95,10 +101,11 @@ export function BlackjackTableOnline({
     },
 
     onAction: (rawAction, fromPlayerId) => {
-      if (!isHost || !state) return;
+      if (!hostingRef.current) return;
+      const current = stateRef.current;
+      if (!current) return;
       const action = rawAction as BlackjackAction;
-      // Validate that the action comes from the correct player
-      const result = validateAction(state, action);
+      const result = validateAction(current, action);
       if (!result.valid) {
         console.warn("[BJ:online] Invalid action from", fromPlayerId, result.reason);
         return;
@@ -110,15 +117,21 @@ export function BlackjackTableOnline({
     onGameStarted: () => setGameStarted(true),
   });
 
+  const hosting = room.isHost;
+  hostingRef.current = hosting;
+
+  const stateRef = React.useRef<BlackjackState | null>(null);
+  stateRef.current = state;
+
   // ── Broadcast state after each change (host) ──────────────────────────────
 
   const prevStateRef = React.useRef<BlackjackState | null>(null);
   React.useEffect(() => {
-    if (!isHost || !state || state === prevStateRef.current) return;
+    if (!hosting || !state || state === prevStateRef.current) return;
     prevStateRef.current = state;
     room.broadcastState(state);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, isHost]);
+  }, [state, hosting]);
 
   // ── Init room on mount ─────────────────────────────────────────────────────
 
@@ -130,7 +143,9 @@ export function BlackjackTableOnline({
       const myName = config?.players.find((p) => p.id === myPlayerId)?.name ?? "Host";
       room.createRoom(myName);
     } else if (initialRoomCode) {
-      room.joinRoom(initialRoomCode, initialPlayerName ?? "Player");
+      room.joinRoom(initialRoomCode, initialPlayerName ?? "Player", {
+        reconnectToken: initialReconnectToken,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -139,7 +154,7 @@ export function BlackjackTableOnline({
 
   const handleAction = React.useCallback(
     (action: BlackjackAction) => {
-      if (isHost) {
+      if (hosting) {
         if (!state) return;
         const result = validateAction(state, action);
         if (!result.valid) return;
@@ -149,7 +164,7 @@ export function BlackjackTableOnline({
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isHost, state]
+    [hosting, state]
   );
 
   // ─── Waiting room ──────────────────────────────────────────────────────────
@@ -157,7 +172,7 @@ export function BlackjackTableOnline({
   // ── Host: auto-start round when all players have placed their bets ──────────
 
   React.useEffect(() => {
-    if (!isHost || !state || state.phase !== "betting") return;
+    if (!hosting || !state || state.phase !== "betting") return;
     const allReady = state.players
       .filter((p) => p.status !== "eliminated")
       .every((p) => p.status === "waiting");
@@ -166,23 +181,26 @@ export function BlackjackTableOnline({
       if (result.valid) dispatch({ type: "START_ROUND" });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isHost, state]);
+  }, [hosting, state]);
 
   if (!gameStarted || !state) {
     return (
-      <BlackjackWaitingRoom
-        isHost={isHost}
-        roomCode={room.roomCode}
-        roomInfo={roomInfo}
-        status={room.status}
-        error={room.error}
+      <>
+        <HostTransferOverlay visible={room.status === "transferring"} />
+        <BlackjackWaitingRoom
+          isHost={hosting}
+          roomCode={room.roomCode}
+          roomInfo={roomInfo}
+          status={room.status}
+          error={room.error}
         expectedCount={config?.players.length ?? 2}
         onStart={() => {
           if (!roomInfo) return;
           // Rebuild state using actual room member IDs so every device can
           // find itself in state.players via its own myPlayerId.
+          const seated = connectedMembers(roomInfo.members);
           const newConfig: GameConfig = {
-            players: roomInfo.members.map((m, i) => ({
+            players: seated.map((m, i) => ({
               id: m.id,
               name: m.name,
               seat: i,
@@ -197,16 +215,18 @@ export function BlackjackTableOnline({
         }}
         onExit={onExit}
       />
+      </>
     );
   }
 
   // ─── Derive this player's data ─────────────────────────────────────────────
 
-  const myPlayer = state.players.find((p) => p.id === myPlayerId);
+  const playerId = room.myPlayerId;
+  const myPlayer = state.players.find((p) => p.id === playerId);
   const cardScale = 0.8;
   const isMyTurn =
     state.phase === "playing" &&
-    state.players[state.currentPlayerIndex]?.id === myPlayerId;
+    state.players[state.currentPlayerIndex]?.id === playerId;
   const allEliminated = state.players.every((p) => p.status === "eliminated");
 
   return (
@@ -218,6 +238,7 @@ export function BlackjackTableOnline({
       role="main"
       aria-label="Blackjack table (online)"
     >
+      <HostTransferOverlay visible={room.status === "transferring"} />
       {/* Top bar */}
       <div className="flex items-center justify-between px-4 pt-safe pt-3 pb-2">
         <Link href="/games/blackjack">
@@ -234,6 +255,14 @@ export function BlackjackTableOnline({
         <RulesHelpButton onClick={openRules} className="text-white/40 hover:text-white/80 hover:bg-white/10" />
       </div>
 
+      <div className="px-4">
+        <DisconnectedPlayersNotice
+          members={roomInfo?.members}
+          roomCode={room.roomCode}
+          compact
+        />
+      </div>
+
       {/* Dealer */}
       <div className="flex-shrink-0 flex justify-center pt-4 pb-6">
         <DealerArea dealer={state.dealer} cardScale={cardScale} />
@@ -247,11 +276,11 @@ export function BlackjackTableOnline({
         {state.phase === "betting" && (
           <OnlineBettingPhase
             players={state.players}
-            myPlayerId={myPlayerId}
+            myPlayerId={playerId}
             myPlayer={myPlayer ?? null}
-            isHost={isHost}
+            isHost={hosting}
             onBet={(amount) => {
-              if (myPlayer) handleAction({ type: "PLACE_BET", playerId: myPlayerId, amount });
+              if (myPlayer) handleAction({ type: "PLACE_BET", playerId, amount });
             }}
             onStartRound={() => handleAction({ type: "START_ROUND" })}
           />
@@ -271,7 +300,7 @@ export function BlackjackTableOnline({
                 <PlayerArea
                   key={player.id}
                   player={player}
-                  isCurrentPlayer={player.id === myPlayerId && isMyTurn}
+                  isCurrentPlayer={player.id === playerId && isMyTurn}
                   cardScale={cardScale}
                 />
               ))}
@@ -280,12 +309,12 @@ export function BlackjackTableOnline({
             {/* Round over */}
             {state.phase === "round-over" && (
               <div className="flex flex-col items-center gap-3 mt-4">
-                {isHost && !allEliminated && (
+                {hosting && !allEliminated && (
                   <Button size="lg" onClick={() => handleAction({ type: "NEXT_ROUND" })}>
                     Next round
                   </Button>
                 )}
-                {isHost && allEliminated && (
+                {hosting && allEliminated && (
                   <div className="flex flex-col items-center gap-3 text-center">
                     <p className="text-white/60 text-sm">All players have been eliminated.</p>
                     <Link href="/games/blackjack">
@@ -293,7 +322,7 @@ export function BlackjackTableOnline({
                     </Link>
                   </div>
                 )}
-                {!isHost && (
+                {!hosting && (
                   <p className="text-white/50 text-sm">Waiting for host to start next round…</p>
                 )}
               </div>
@@ -528,7 +557,7 @@ function BlackjackWaitingRoom({
   onStart,
   onExit,
 }: BlackjackWaitingRoomProps) {
-  const joinedCount = roomInfo?.members.length ?? 0;
+  const joinedCount = connectedMembers(roomInfo?.members).length;
   const canStart = isHost && joinedCount >= 2;
 
   return (
@@ -576,13 +605,22 @@ function BlackjackWaitingRoom({
             </p>
             {roomInfo.members.map((m) => (
               <div key={m.id} className="flex items-center gap-3 px-4 py-3 bg-zinc-800 rounded-xl">
-                <div className="w-2 h-2 rounded-full bg-green-400" />
-                <span className="text-sm font-medium text-white flex-1">{m.name}</span>
+                <ConnectionDot connected={isMemberConnected(m)} />
+                <span className="text-sm font-medium text-white flex-1">
+                  {m.name}
+                  {!isMemberConnected(m) && (
+                    <span className="ml-2 text-[10px] text-red-400 uppercase">away</span>
+                  )}
+                </span>
                 {m.role === "host" && (
                   <span className="text-[10px] text-zinc-500 bg-zinc-700 px-2 py-0.5 rounded-full">host</span>
                 )}
               </div>
             ))}
+            <DisconnectedPlayersNotice
+              members={roomInfo.members}
+              roomCode={roomCode}
+            />
           </div>
         )}
 

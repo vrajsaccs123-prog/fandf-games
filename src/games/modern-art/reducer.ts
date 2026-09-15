@@ -12,6 +12,7 @@ import {
   OneOfferAuctionState,
   HiddenAuctionState,
   FixedPriceAuctionState,
+  openAuctionLockRemainingMs,
 } from "./types";
 import { ARTIST_ORDER } from "./types";
 import { ALL_PAINTINGS, CARDS_PER_ROUND, PAINTINGS_TO_END_ROUND } from "./data";
@@ -590,6 +591,7 @@ export function reduce(
       const auction = state.auction as OpenAuctionState;
       if (!auction || auction.type !== "open") return state;
       if (action.playerId !== auction.auctioneerId) return state;
+      if (openAuctionLockRemainingMs(auction.openedAt) > 0) return state;
 
       const winnerId = auction.currentHighestBidderId;
       const amount = auction.currentHighestBid;
@@ -914,6 +916,7 @@ function startAuction(
           auctioneerId,
           currentHighestBid: 0,
           currentHighestBidderId: null,
+          openedAt: Date.now(),
         },
       };
 

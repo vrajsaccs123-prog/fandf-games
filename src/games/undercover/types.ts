@@ -84,6 +84,8 @@ export interface VoteResult {
   maxVotes: number;
   leaders: string[];              // playerIds tied for most votes
   isTie: boolean;
+  /** True after a living Judge casts the extra tie-breaking vote. */
+  tieBrokenByJudge?: boolean;
 }
 
 // ─── Win condition ────────────────────────────────────────────────────────────
@@ -210,6 +212,10 @@ export interface UndercoverState {
 
   // Vote result
   voteResult: VoteResult | null;
+
+  // Judge tie-break: living Judge ID who must cast an extra vote among tied leaders.
+  // Null when not awaiting a Judge decision. Do not expose this ID in player views.
+  pendingJudgeDecision: string | null;
 
   // Elimination
   pendingElimination: string | null;   // targetId awaiting creator confirmation

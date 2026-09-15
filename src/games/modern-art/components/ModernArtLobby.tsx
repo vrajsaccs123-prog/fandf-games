@@ -15,6 +15,10 @@ import { Button } from "@/components/ui/Button";
 import { useGameSessionStore } from "@/stores/gameSessionStore";
 import { modernArtFacts } from "../rules";
 import { formatPlayerRange } from "@/game/core/rulesFacts";
+import {
+  formatJoinCodeInput,
+  joinPayloadFromInput,
+} from "@/lib/online/reconnectCode";
 
 // ─── Stable per-device player ID ─────────────────────────────────────────────
 //
@@ -71,21 +75,23 @@ export function ModernArtLobby() {
 
   function handleJoin() {
     const trimmedName = name.trim();
-    const trimmedCode = roomCode.trim().toUpperCase();
-    if (!trimmedName) {
+    const payload = joinPayloadFromInput(roomCode);
+    const isRejoin = Boolean(payload?.reconnectToken);
+    if (!isRejoin && !trimmedName) {
       setError("Please enter your name.");
       return;
     }
-    if (trimmedCode.length !== 6) {
-      setError("Room code must be 6 letters.");
+    if (!payload) {
+      setError("Enter a 6-letter room code, or a rejoin code if you got disconnected.");
       return;
     }
     setError("");
     setModernArt({
       type: "online-join",
       playerId,
-      roomCode: trimmedCode,
-      playerName: trimmedName,
+      roomCode: payload.roomCode,
+      playerName: trimmedName || "Guest",
+      reconnectToken: payload.reconnectToken,
     });
     router.push("/games/modern-art/play");
   }
@@ -139,15 +145,15 @@ export function ModernArtLobby() {
       {tab === "join" && (
         <div>
           <label className="text-xs font-medium text-[rgb(var(--color-text-muted))] uppercase tracking-wide block mb-2">
-            Room Code
+            Room or Rejoin Code
           </label>
           <input
             type="text"
             value={roomCode}
-            onChange={(e) => { setRoomCode(e.target.value.toUpperCase().slice(0, 6)); setError(""); }}
+            onChange={(e) => { setRoomCode(formatJoinCodeInput(e.target.value)); setError(""); }}
             onKeyDown={(e) => e.key === "Enter" && handleJoin()}
-            placeholder="6-letter code…"
-            maxLength={6}
+            placeholder="A3K7P2 or A3K7P2-K9M4"
+            maxLength={11}
             className={cn(inputCls, "font-mono tracking-[0.2em] text-center text-lg")}
           />
         </div>
@@ -162,7 +168,7 @@ export function ModernArtLobby() {
       <div className="text-xs text-[rgb(var(--color-text-muted))] text-center leading-relaxed">
         {tab === "create"
           ? `You'll receive a 6-letter room code to share. You decide when to start (${formatPlayerRange(modernArtFacts)} players needed).`
-          : "Ask the host for the room code. Make sure everyone is on the same screen before the host starts."}
+          : "Ask the host for the room code. Got disconnected? Paste the rejoin code your friends share to reclaim your seat."}
       </div>
 
       {/* Action button */}
@@ -172,7 +178,7 @@ export function ModernArtLobby() {
         </Button>
       ) : (
         <Button variant="primary" size="lg" fullWidth onClick={handleJoin}>
-          🚪 Join Room
+          {joinPayloadFromInput(roomCode)?.reconnectToken ? "🔄 Rejoin Game" : "🚪 Join Room"}
         </Button>
       )}
     </div>

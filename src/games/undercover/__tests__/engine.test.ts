@@ -8,7 +8,9 @@ import { reduce } from "../reducer";
 import { processElimination } from "../engine/elimination";
 import { checkWinConditions } from "../engine/winConditions";
 import { applyRoundScores } from "../scoring";
-import type { UndercoverPlayer, SpecialCharacterSettings } from "../types";
+import { getAvailableActions, getPlayerView } from "../selectors";
+import { validateAction } from "../validation";
+import type { UndercoverPlayer, SpecialCharacterSettings, UndercoverState } from "../types";
 import type { GameConfig } from "@/game/core/types";
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -135,6 +137,204 @@ describe("SUBMIT_VOTE", () => {
     state = reduce(state, { type: "SUBMIT_VOTE", voterId: "p1", targetId: "p2" });
     state = reduce(state, { type: "SUBMIT_VOTE", voterId: "p1", targetId: "p3" }); // duplicate
     expect(state.votes["p1"]).toBe("p2"); // unchanged
+  });
+});
+
+// ─── Judge tie-break ──────────────────────────────────────────────────────────
+
+function setupOnlineVoting(opts: {
+  judgeId?: string | null;
+  playerCount?: number;
+  seed?: string;
+}): UndercoverState {
+  const playerCount = opts.playerCount ?? 4;
+  const names = ["A", "B", "C", "D", "E", "F"].slice(0, playerCount);
+  const civilians = playerCount - 2;
+  const config = makeConfig(names, {
+    mode: "online",
+    civilians,
+    undercovers: 1,
+    mrWhites: 1,
+    specialCharacters: { ...noSpecials, judge: Boolean(opts.judgeId) },
+  });
+  const state = createInitialState(config, opts.seed ?? "judge-tie");
+  const turnOrder = names.map((_, i) => `p${i + 1}`);
+  return {
+    ...state,
+    mode: "online",
+    phase: "voting",
+    turnOrder,
+    currentVoterIndex: 0,
+    votes: {},
+    pendingElimination: null,
+    pendingJudgeDecision: null,
+    voteResult: null,
+    players: state.players.map((p) => {
+      const withoutJudge = p.specialCharacters.filter((s) => s !== "judge");
+      if (opts.judgeId && p.id === opts.judgeId) {
+        return { ...p, specialCharacters: [...withoutJudge, "judge"] };
+      }
+      return { ...p, specialCharacters: withoutJudge };
+    }),
+    settings: {
+      ...state.settings,
+      specialCharacters: {
+        ...state.settings.specialCharacters,
+        judge: Boolean(opts.judgeId),
+      },
+    },
+  };
+}
+
+function castFourPlayerTie(state: UndercoverState): UndercoverState {
+  state = reduce(state, { type: "SUBMIT_VOTE", voterId: "p1", targetId: "p2" });
+  state = reduce(state, { type: "SUBMIT_VOTE", voterId: "p2", targetId: "p1" });
+  state = reduce(state, { type: "SUBMIT_VOTE", voterId: "p3", targetId: "p2" });
+  state = reduce(state, { type: "SUBMIT_VOTE", voterId: "p4", targetId: "p1" });
+  return state;
+}
+
+describe("Judge tie-break", () => {
+  it("asks a living Judge to break a tie instead of setting pendingElimination", () => {
+    let state = setupOnlineVoting({ judgeId: "p4" });
+    state = castFourPlayerTie(state);
+
+    expect(state.voteResult?.isTie).toBe(true);
+    expect(state.voteResult?.leaders.sort()).toEqual(["p1", "p2"]);
+    expect(state.pendingJudgeDecision).toBe("p4");
+    expect(state.pendingElimination).toBeNull();
+    expect(state.phase).toBe("voting");
+  });
+
+  it("lets the Judge add one extra vote, then the host confirms elimination", () => {
+    let state = setupOnlineVoting({ judgeId: "p4" });
+    state = castFourPlayerTie(state);
+
+    const judgeActions = getAvailableActions(state, "p4");
+    expect(judgeActions).toEqual(
+      expect.arrayContaining([
+        { type: "JUDGE_DECISION", judgeId: "p4", targetId: "p1" },
+        { type: "JUDGE_DECISION", judgeId: "p4", targetId: "p2" },
+      ])
+    );
+    expect(getAvailableActions(state, "p1").some((a) => a.type === "CONFIRM_ELIMINATION")).toBe(false);
+
+    const judgeView = getPlayerView(state, "p4");
+    const otherView = getPlayerView(state, "p1");
+    expect(judgeView.awaitingJudgeDecision).toBe(true);
+    expect(judgeView.isJudge).toBe(true);
+    expect(otherView.awaitingJudgeDecision).toBe(true);
+    expect(otherView.isJudge).toBe(false);
+
+    state = reduce(state, { type: "JUDGE_DECISION", judgeId: "p4", targetId: "p2" });
+
+    expect(state.pendingJudgeDecision).toBeNull();
+    expect(state.pendingElimination).toBe("p2");
+    expect(state.voteResult?.totals["p2"]).toBe(3);
+    expect(state.voteResult?.totals["p1"]).toBe(2);
+    expect(state.voteResult?.isTie).toBe(false);
+    expect(state.voteResult?.tieBrokenByJudge).toBe(true);
+    expect(state.votes["p4"]).toBe("p1");
+    expect(state.events.some((e) => e.type === "JUDGE_DECISION")).toBe(true);
+
+    const hostActions = getAvailableActions(state, "p1");
+    expect(hostActions).toEqual(
+      expect.arrayContaining([
+        { type: "CONFIRM_ELIMINATION", targetId: "p2" },
+        { type: "REQUEST_REVOTE" },
+      ])
+    );
+
+    state = reduce(state, { type: "CONFIRM_ELIMINATION", targetId: "p2" });
+    expect(state.phase).toBe("elimination_reveal");
+    expect(state.players.find((p) => p.id === "p2")?.isEliminated).toBe(true);
+  });
+
+  it("rejects a Judge pick that is not among the tied players", () => {
+    let state = setupOnlineVoting({ judgeId: "p4" });
+    state = castFourPlayerTie(state);
+
+    const invalid = validateAction(state, {
+      type: "JUDGE_DECISION",
+      judgeId: "p4",
+      targetId: "p3",
+    });
+    expect(invalid.valid).toBe(false);
+
+    const after = reduce(state, { type: "JUDGE_DECISION", judgeId: "p4", targetId: "p3" });
+    expect(after.pendingJudgeDecision).toBe("p4");
+    expect(after.pendingElimination).toBeNull();
+  });
+
+  it("rejects a non-Judge trying to break the tie", () => {
+    let state = setupOnlineVoting({ judgeId: "p4" });
+    state = castFourPlayerTie(state);
+
+    const invalid = validateAction(state, {
+      type: "JUDGE_DECISION",
+      judgeId: "p1",
+      targetId: "p2",
+    });
+    expect(invalid.valid).toBe(false);
+  });
+
+  it("lets the Judge pick themselves when they are tied", () => {
+    let state = setupOnlineVoting({ judgeId: "p1" });
+    state = castFourPlayerTie(state);
+
+    expect(state.pendingJudgeDecision).toBe("p1");
+    state = reduce(state, { type: "JUDGE_DECISION", judgeId: "p1", targetId: "p1" });
+    expect(state.pendingElimination).toBe("p1");
+    expect(state.voteResult?.totals["p1"]).toBe(3);
+  });
+
+  it("picks a random tied player when there is no living Judge", () => {
+    let state = setupOnlineVoting({ judgeId: null });
+    state = castFourPlayerTie(state);
+
+    expect(state.pendingJudgeDecision).toBeNull();
+    expect(["p1", "p2"]).toContain(state.pendingElimination);
+    expect(state.voteResult?.isTie).toBe(true);
+  });
+
+  it("picks a random tied player when the Judge is already eliminated", () => {
+    let state = setupOnlineVoting({ judgeId: "p5", playerCount: 5 });
+    state = {
+      ...state,
+      players: state.players.map((p) =>
+        p.id === "p5" ? { ...p, isEliminated: true } : p
+      ),
+    };
+    state = castFourPlayerTie(state);
+
+    expect(state.pendingJudgeDecision).toBeNull();
+    expect(["p1", "p2"]).toContain(state.pendingElimination);
+  });
+
+  it("does not involve the Judge when the vote is not a tie", () => {
+    let state = setupOnlineVoting({ judgeId: "p4" });
+    state = reduce(state, { type: "SUBMIT_VOTE", voterId: "p1", targetId: "p2" });
+    state = reduce(state, { type: "SUBMIT_VOTE", voterId: "p2", targetId: "p3" });
+    state = reduce(state, { type: "SUBMIT_VOTE", voterId: "p3", targetId: "p2" });
+    state = reduce(state, { type: "SUBMIT_VOTE", voterId: "p4", targetId: "p2" });
+
+    expect(state.pendingJudgeDecision).toBeNull();
+    expect(state.pendingElimination).toBe("p2");
+    expect(state.voteResult?.isTie).toBe(false);
+  });
+
+  it("lets the host revote while waiting for the Judge", () => {
+    let state = setupOnlineVoting({ judgeId: "p4" });
+    state = castFourPlayerTie(state);
+
+    expect(validateAction(state, { type: "REQUEST_REVOTE" }).valid).toBe(true);
+    state = reduce(state, { type: "REQUEST_REVOTE" });
+
+    expect(state.votes).toEqual({});
+    expect(state.voteResult).toBeNull();
+    expect(state.pendingJudgeDecision).toBeNull();
+    expect(state.pendingElimination).toBeNull();
+    expect(state.currentVoterIndex).toBe(0);
   });
 });
 

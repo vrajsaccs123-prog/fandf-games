@@ -32,6 +32,8 @@ export interface CodenamesPlayerView {
   clueHistory: CodenamesState["clueHistory"];
   winner: CodenamesState["winner"];
   winReason: CodenamesState["winReason"];
+  timerSeconds: CodenamesState["timerSeconds"];
+  phaseStartedAt: CodenamesState["phaseStartedAt"];
   /** The viewer's player record */
   me: CodenamesState["players"][number] | null;
 }
@@ -67,6 +69,8 @@ export function getPlayerView(
     clueHistory: state.clueHistory,
     winner: state.winner,
     winReason: state.winReason,
+    timerSeconds: state.timerSeconds,
+    phaseStartedAt: state.phaseStartedAt,
   };
 }
 

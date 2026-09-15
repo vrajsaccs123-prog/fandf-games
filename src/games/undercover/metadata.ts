@@ -11,7 +11,7 @@ export const undercoverMetadata: GameMetadata = {
 
   ...catalogueFieldsFromRules(undercoverFacts),
 
-  difficulty: "medium",
+  difficulty: "easy",
 
   durationMinutes: { min: 15, max: 60 },
 

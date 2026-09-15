@@ -23,13 +23,22 @@ import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/Button";
 import { useOnlineRoom } from "@/hooks/useOnlineRoom";
 import type { RoomInfo } from "@/lib/online/types";
-import { normalizeRoomCode, isValidRoomCode } from "@/lib/online/roomCode";
+import {
+  formatJoinCodeInput,
+  joinPayloadFromInput,
+  connectedMembers,
+  isMemberConnected,
+} from "@/lib/online/reconnectCode";
+import { DisconnectedPlayersNotice, ConnectionDot } from "@/components/online/DisconnectedPlayersNotice";
+import { HostTransferOverlay } from "@/components/online/HostTransferOverlay";
 import { createInitialState } from "../state";
 import { reduce } from "../reducer";
 import { validateAction } from "../validation";
 import type { CodenamesState, Team } from "../types";
 import type { CodenamesAction } from "../actions";
 import { CodenamesGame } from "./CodenamesGame";
+import { TimerSettings } from "./TimerSettings";
+import { TIMER_DEFAULT_SECONDS } from "../timer";
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
 
@@ -40,7 +49,12 @@ interface Assignment {
 
 /** Broadcasted by host to all players */
 type CodenamesSync =
-  | { phase: "lobby"; assignments: Record<string, Assignment>; memberNames: Record<string, string> }
+  | {
+      phase: "lobby";
+      assignments: Record<string, Assignment>;
+      memberNames: Record<string, string>;
+      timerSeconds: number | null;
+    }
   | { phase: "game"; gameState: CodenamesState };
 
 // ─── Exported component ───────────────────────────────────────────────────────
@@ -59,6 +73,7 @@ export function CodenamesOnline({ onExit }: CodenamesOnlineProps) {
   const [joinCode, setJoinCode] = React.useState("");
   const [myName, setMyName] = React.useState("");
   const [initialRoomCode, setInitialRoomCode] = React.useState("");
+  const [reconnectToken, setReconnectToken] = React.useState<string | undefined>();
   // Stable player ID for this session
   const [myPlayerId] = React.useState(() => `cn-${Date.now()}`);
 
@@ -72,7 +87,7 @@ export function CodenamesOnline({ onExit }: CodenamesOnlineProps) {
           {(
             [
               { label: "Create Room", sub: "Host a game for friends", emoji: "🏠", action: "create" },
-              { label: "Join Room", sub: "Enter a 6-letter code", emoji: "🔗", action: "join" },
+              { label: "Join Room", sub: "Enter a room or rejoin code", emoji: "🔗", action: "join" },
             ] as const
           ).map((opt) => (
             <button
@@ -147,18 +162,18 @@ export function CodenamesOnline({ onExit }: CodenamesOnlineProps) {
   // ── Join Room setup ───────────────────────────────────────────────────────
 
   if (screen === "join") {
-    const normalised = normalizeRoomCode(joinCode);
-    const codeValid = isValidRoomCode(normalised);
-    const ready = joinName.trim().length >= 1 && codeValid;
+    const payload = joinPayloadFromInput(joinCode);
+    const isRejoin = Boolean(payload?.reconnectToken);
+    const ready = payload !== null && (isRejoin || joinName.trim().length >= 1);
     return (
       <div className="flex flex-col gap-4">
         <h3 className="font-semibold text-[rgb(var(--color-text))]">Join a Room</h3>
         <input
           type="text"
-          placeholder="Room code (6 letters)"
+          placeholder="Room code or rejoin code"
           value={joinCode}
-          onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-          maxLength={6}
+          onChange={(e) => setJoinCode(formatJoinCodeInput(e.target.value))}
+          maxLength={11}
           autoFocus
           className={cn(
             "h-11 px-3 rounded-lg border text-sm font-mono tracking-widest uppercase",
@@ -168,9 +183,12 @@ export function CodenamesOnline({ onExit }: CodenamesOnlineProps) {
             "focus:outline-none focus:ring-2 focus:ring-[rgb(var(--color-focus))]"
           )}
         />
+        <p className="text-xs text-[rgb(var(--color-text-muted))] -mt-2">
+          Got disconnected? Paste the rejoin code your friends share to reclaim your seat.
+        </p>
         <input
           type="text"
-          placeholder="Your name"
+          placeholder={isRejoin ? "Your name (optional)" : "Your name"}
           value={joinName}
           onChange={(e) => setJoinName(e.target.value)}
           maxLength={20}
@@ -190,13 +208,15 @@ export function CodenamesOnline({ onExit }: CodenamesOnlineProps) {
             variant="primary"
             disabled={!ready}
             onClick={() => {
-              setMyName(joinName.trim());
-              setInitialRoomCode(normalised);
+              if (!payload) return;
+              setMyName(joinName.trim() || "Player");
+              setInitialRoomCode(payload.roomCode);
+              setReconnectToken(payload.reconnectToken);
               setScreen("room");
             }}
             className="flex-1"
           >
-            Join →
+            {isRejoin ? "Rejoin →" : "Join →"}
           </Button>
         </div>
       </div>
@@ -211,6 +231,7 @@ export function CodenamesOnline({ onExit }: CodenamesOnlineProps) {
       myPlayerId={myPlayerId}
       myName={myName}
       initialRoomCode={isHost ? "" : initialRoomCode}
+      initialReconnectToken={reconnectToken}
       onExit={onExit}
     />
   );
@@ -223,10 +244,11 @@ interface OnlineRoomProps {
   myPlayerId: string;
   myName: string;
   initialRoomCode: string;
+  initialReconnectToken?: string;
   onExit: () => void;
 }
 
-function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: OnlineRoomProps) {
+function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, initialReconnectToken, onExit }: OnlineRoomProps) {
   // ── Host: authoritative state ─────────────────────────────────────────────
   const assignmentsRef = React.useRef<Record<string, Assignment>>({
     [myPlayerId]: { team: "none", isSpymaster: false },
@@ -242,16 +264,29 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
     [myPlayerId]: myName,
   });
   const [gameState, setGameState] = React.useState<CodenamesState | null>(null);
+  const [timerEnabled, setTimerEnabled] = React.useState(false);
+  const [timerSeconds, setTimerSeconds] = React.useState(TIMER_DEFAULT_SECONDS);
 
   // ── Non-host: sync state received from host ───────────────────────────────
   const [syncState, setSyncState] = React.useState<CodenamesSync | null>(null);
+  const syncStateRef = React.useRef<CodenamesSync | null>(null);
   const [roomInfo, setRoomInfo] = React.useState<RoomInfo | null>(null);
+  const hostingRef = React.useRef(isHost);
 
   // ── Broadcast ref (stable reference to room.broadcastState) ───────────────
   const broadcastRef = React.useRef<(s: unknown) => void>(() => {});
 
-  function hostBroadcastLobby(a: Record<string, Assignment>, names: Record<string, string>) {
-    broadcastRef.current({ phase: "lobby", assignments: a, memberNames: names } satisfies CodenamesSync);
+  function hostBroadcastLobby(
+    a: Record<string, Assignment>,
+    names: Record<string, string>,
+    seconds: number | null = timerEnabled ? timerSeconds : null
+  ) {
+    broadcastRef.current({
+      phase: "lobby",
+      assignments: a,
+      memberNames: names,
+      timerSeconds: seconds,
+    } satisfies CodenamesSync);
   }
   function hostBroadcastGame(gs: CodenamesState) {
     broadcastRef.current({ phase: "game", gameState: gs } satisfies CodenamesSync);
@@ -265,6 +300,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
 
     onGameState: (raw) => {
       const sync = raw as CodenamesSync;
+      syncStateRef.current = sync;
       setSyncState(sync);
       if (sync.phase === "game") {
         setGameState(sync.gameState);
@@ -273,7 +309,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
     },
 
     onAction: (rawAction) => {
-      if (!isHost) return;
+      if (!hostingRef.current) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const action = rawAction as any;
 
@@ -309,7 +345,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
       setMemberNames(newNames);
 
       // Host: add new members to assignments
-      if (isHost) {
+      if (hostingRef.current) {
         const curA = { ...assignmentsRef.current };
         let changed = false;
         for (const m of info.members) {
@@ -327,7 +363,27 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
     },
 
     onGameStarted: () => {},
+    onBecameHost: () => {
+      const sync = syncStateRef.current;
+      if (!sync) return;
+      if (sync.phase === "lobby") {
+        assignmentsRef.current = sync.assignments;
+        setAssignments(sync.assignments);
+        memberNamesRef.current = sync.memberNames;
+        setMemberNames(sync.memberNames);
+        if (sync.timerSeconds != null) {
+          setTimerEnabled(true);
+          setTimerSeconds(sync.timerSeconds);
+        }
+      } else {
+        gameStateRef.current = sync.gameState;
+        setGameState(sync.gameState);
+      }
+    },
   });
+
+  const hosting = room.isHost;
+  hostingRef.current = hosting;
 
   // Keep broadcastRef stable
   broadcastRef.current = room.broadcastState;
@@ -340,7 +396,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
     if (isHost) {
       room.createRoom(myName);
     } else {
-      room.joinRoom(initialRoomCode, myName);
+      room.joinRoom(initialRoomCode, myName, { reconnectToken: initialReconnectToken });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -348,29 +404,41 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
   // ── Host: broadcast after local state changes ─────────────────────────────
   const prevSyncRef = React.useRef<string>("");
   React.useEffect(() => {
-    if (!isHost) return;
+    if (!hosting) return;
     const gs = gameState;
     const sync: CodenamesSync = gs
       ? { phase: "game", gameState: gs }
-      : { phase: "lobby", assignments, memberNames };
+      : {
+          phase: "lobby",
+          assignments,
+          memberNames,
+          timerSeconds: timerEnabled ? timerSeconds : null,
+        };
     const key = JSON.stringify(sync);
     if (key === prevSyncRef.current) return;
     prevSyncRef.current = key;
     broadcastRef.current(sync);
-  }, [assignments, memberNames, gameState, isHost]);
+  }, [assignments, memberNames, gameState, hosting, timerEnabled, timerSeconds]);
 
   // ── Derive display state ──────────────────────────────────────────────────
-  const displayAssignments: Record<string, Assignment> = isHost
+  const displayAssignments: Record<string, Assignment> = hosting
     ? assignments
     : syncState?.phase === "lobby"
     ? syncState.assignments
     : {};
-  const displayMemberNames: Record<string, string> = isHost
+  const displayTimerSeconds: number | null = hosting
+    ? timerEnabled
+      ? timerSeconds
+      : null
+    : syncState?.phase === "lobby"
+    ? syncState.timerSeconds ?? null
+    : null;
+  const displayMemberNames: Record<string, string> = hosting
     ? memberNames
     : syncState?.phase === "lobby"
     ? syncState.memberNames
     : memberNames;
-  const displayGameState: CodenamesState | null = isHost
+  const displayGameState: CodenamesState | null = hosting
     ? gameState
     : syncState?.phase === "game"
     ? syncState.gameState
@@ -383,39 +451,52 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
   const redSpymasters = redPlayers.filter(([, a]) => a.isSpymaster);
   const blueSpymasters = bluePlayers.filter(([, a]) => a.isSpymaster);
   const canStart =
-    isHost &&
+    hosting &&
     redPlayers.length >= 2 &&
     bluePlayers.length >= 2 &&
     redSpymasters.length === 1 &&
     blueSpymasters.length === 1;
 
+  const playerId = room.myPlayerId;
+
   // ── Team/role change (this player) ───────────────────────────────────────
   function handleMyChange(team: "red" | "blue" | "none", isSpy: boolean) {
-    if (isHost) {
-      const newA = { ...assignmentsRef.current, [myPlayerId]: { team, isSpymaster: isSpy } };
+    if (hosting) {
+      const newA = { ...assignmentsRef.current, [playerId]: { team, isSpymaster: isSpy } };
       assignmentsRef.current = newA;
       setAssignments(newA);
     } else {
-      room.sendAction({ type: "LOBBY_CHANGE", playerId: myPlayerId, team, isSpymaster: isSpy });
+      room.sendAction({ type: "LOBBY_CHANGE", playerId, team, isSpymaster: isSpy });
     }
   }
 
   // ── Start game (host only) ────────────────────────────────────────────────
   function handleStartGame() {
-    if (!isHost) return;
+    if (!hosting) return;
     const players: Array<{ id: string; name: string; seat: number; isHuman: boolean }> = [];
     const teams: Record<string, Team> = {};
     const spymasters: { red: string; blue: string } = { red: "", blue: "" };
 
     let seat = 0;
+    const seatedIds = new Set(
+      connectedMembers(roomInfo?.members).map((m) => m.id)
+    );
     for (const [pid, a] of Object.entries(assignmentsRef.current)) {
       if (a.team === "none") continue;
+      if (seatedIds.size > 0 && !seatedIds.has(pid)) continue;
       players.push({ id: pid, name: memberNamesRef.current[pid] ?? "Player", seat: seat++, isHuman: true });
       teams[pid] = a.team;
       if (a.isSpymaster) spymasters[a.team] = pid;
     }
 
-    const gs = createInitialState({ players, options: { teams, spymasters } });
+    const gs = createInitialState({
+      players,
+      options: {
+        teams,
+        spymasters,
+        timerSeconds: timerEnabled ? timerSeconds : null,
+      },
+    });
     gameStateRef.current = gs;
     setGameState(gs);
     room.broadcastStart();
@@ -424,7 +505,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
 
   // ── Game action (any player) ──────────────────────────────────────────────
   function handleGameAction(action: CodenamesAction) {
-    if (isHost) {
+    if (hosting) {
       const gs = gameStateRef.current;
       if (!gs) return;
       const result = validateAction(gs, action);
@@ -440,7 +521,7 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
 
   // ── Play Again (host: reset to lobby) ─────────────────────────────────────
   function handlePlayAgain() {
-    if (!isHost) return;
+    if (!hosting) return;
     gameStateRef.current = null;
     setGameState(null);
     const newA = { ...assignmentsRef.current };
@@ -461,12 +542,16 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
     );
   }
 
-  if (room.status === "creating" || room.status === "joining") {
+  if (room.status === "creating" || room.status === "joining" || room.status === "transferring") {
     return (
       <div className="flex flex-col gap-3 items-center py-8 text-center">
         <div className="text-3xl animate-pulse">🔗</div>
         <p className="text-[rgb(var(--color-text-muted))] text-sm">
-          {room.status === "creating" ? "Creating room…" : "Connecting to room…"}
+          {room.status === "creating"
+            ? "Creating room…"
+            : room.status === "transferring"
+            ? "The host left. Passing the room to another player…"
+            : "Connecting to room…"}
         </p>
       </div>
     );
@@ -475,31 +560,50 @@ function OnlineRoom({ isHost, myPlayerId, myName, initialRoomCode, onExit }: Onl
   // ── Active game ───────────────────────────────────────────────────────────
   if (displayGameState) {
     return (
-      <div className="fixed inset-0 z-[var(--z-game)] bg-[#0d2b0d] overflow-y-auto">
+      <div className="fixed inset-0 z-[var(--z-game)] bg-[#3a1f0d] overflow-y-auto">
+        <div className="fixed top-3 left-1/2 -translate-x-1/2 z-50 w-[min(24rem,calc(100%-1.5rem))]">
+          <DisconnectedPlayersNotice
+            members={roomInfo?.members}
+            roomCode={room.roomCode}
+            compact
+          />
+        </div>
         <CodenamesGame
           state={displayGameState}
           onAction={handleGameAction}
           onExit={onExit}
           onPlayAgain={handlePlayAgain}
-          myPlayerId={myPlayerId}
+          myPlayerId={playerId}
+          isHost={hosting}
         />
       </div>
     );
   }
 
   // ── Waiting room ──────────────────────────────────────────────────────────
-  const myAssignment = displayAssignments[myPlayerId] ?? { team: "none", isSpymaster: false };
+  const myAssignment = displayAssignments[playerId] ?? { team: "none", isSpymaster: false };
 
   return (
     <WaitingRoom
-      isHost={isHost}
-      myPlayerId={myPlayerId}
+      isHost={hosting}
+      myPlayerId={playerId}
       roomCode={room.roomCode}
+      roomInfo={roomInfo}
       status={room.status}
       assignments={displayAssignments}
       memberNames={displayMemberNames}
       myAssignment={myAssignment}
       canStart={canStart}
+      timerSeconds={displayTimerSeconds}
+      onTimerEnabledChange={hosting ? setTimerEnabled : undefined}
+      onTimerSecondsChange={
+        hosting
+          ? (seconds) => {
+              setTimerSeconds(seconds);
+              setTimerEnabled(true);
+            }
+          : undefined
+      }
       onMyChange={handleMyChange}
       onStartGame={handleStartGame}
       onExit={onExit}
@@ -513,11 +617,15 @@ interface WaitingRoomProps {
   isHost: boolean;
   myPlayerId: string;
   roomCode: string | null;
+  roomInfo: RoomInfo | null;
   status: string;
   assignments: Record<string, Assignment>;
   memberNames: Record<string, string>;
   myAssignment: Assignment;
   canStart: boolean;
+  timerSeconds: number | null;
+  onTimerEnabledChange?: (enabled: boolean) => void;
+  onTimerSecondsChange?: (seconds: number) => void;
   onMyChange: (team: "red" | "blue" | "none", isSpymaster: boolean) => void;
   onStartGame: () => void;
   onExit: () => void;
@@ -527,10 +635,14 @@ function WaitingRoom({
   isHost,
   myPlayerId,
   roomCode,
+  roomInfo,
   assignments,
   memberNames,
   myAssignment,
   canStart,
+  timerSeconds,
+  onTimerEnabledChange,
+  onTimerSecondsChange,
   onMyChange,
   onStartGame,
   onExit,
@@ -562,9 +674,16 @@ function WaitingRoom({
             {roomCode}
           </p>
           <p className="text-xs text-[rgb(var(--color-text-muted))] mt-1">
-            Others join at the Codenames page
+            Others join at the Codenames page. If someone drops, share their rejoin code.
           </p>
         </div>
+      )}
+
+      {roomInfo && (
+        <DisconnectedPlayersNotice
+          members={roomInfo.members}
+          roomCode={roomCode}
+        />
       )}
 
       {/* My team picker */}
@@ -577,6 +696,7 @@ function WaitingRoom({
         unassigned={unassigned}
         memberNames={memberNames}
         myPlayerId={myPlayerId}
+        members={roomInfo?.members}
       />
 
       {/* Validation */}
@@ -592,6 +712,14 @@ function WaitingRoom({
           ✓ Teams are ready! {redPlayers.length} vs {bluePlayers.length}
         </p>
       )}
+
+      <TimerSettings
+        enabled={timerSeconds != null}
+        seconds={timerSeconds ?? TIMER_DEFAULT_SECONDS}
+        onEnabledChange={onTimerEnabledChange ?? (() => {})}
+        onSecondsChange={onTimerSecondsChange ?? (() => {})}
+        readOnly={!isHost}
+      />
 
       {/* Actions */}
       <div className="flex flex-col gap-2">
@@ -704,16 +832,19 @@ function PlayerRoster({
   unassigned,
   memberNames,
   myPlayerId,
+  members,
 }: {
   redPlayers: [string, Assignment][];
   bluePlayers: [string, Assignment][];
   unassigned: [string, Assignment][];
   memberNames: Record<string, string>;
   myPlayerId: string;
+  members?: RoomInfo["members"];
 }) {
   function renderPlayer(pid: string, a: Assignment, teamColor: "red" | "blue" | null) {
     const isMe = pid === myPlayerId;
     const name = memberNames[pid] ?? pid;
+    const connected = isMemberConnected(members?.find((m) => m.id === pid) ?? { connected: true });
     return (
       <div
         key={pid}
@@ -725,13 +856,16 @@ function PlayerRoster({
               : teamColor === "blue"
               ? "bg-blue-500/20 font-bold"
               : "bg-[rgb(var(--color-surface-raised))] font-bold"
-            : ""
+            : "",
+          !connected && "opacity-60"
         )}
       >
+        <ConnectionDot connected={connected} />
         <span className="text-sm">{a.isSpymaster ? "🕵️" : "🔍"}</span>
         <span className="flex-1 text-[rgb(var(--color-text))]">
           {name}
           {isMe && <span className="ml-1 text-[rgb(var(--color-text-muted))]">(you)</span>}
+          {!connected && <span className="ml-1 text-red-400">(away)</span>}
         </span>
         <span className="text-[rgb(var(--color-text-muted))] text-[10px]">
           {a.isSpymaster ? "Spymaster" : "Operative"}

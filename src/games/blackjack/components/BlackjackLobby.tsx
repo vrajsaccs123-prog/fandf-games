@@ -23,7 +23,10 @@ import { Button } from "@/components/ui/Button";
 import type { GameConfig } from "@/game/core/types";
 import { blackjackFacts } from "../rules";
 import { playerCountOptions } from "@/game/core/rulesFacts";
-import { normalizeRoomCode, isValidRoomCode } from "@/lib/online/roomCode";
+import {
+  formatJoinCodeInput,
+  joinPayloadFromInput,
+} from "@/lib/online/reconnectCode";
 import { useGameSessionStore } from "@/stores/gameSessionStore";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -89,14 +92,17 @@ export function BlackjackLobby({ onStart }: BlackjackLobbyProps) {
   }
 
   function handleOnlineJoin() {
-    const code = normalizeRoomCode(joinCode);
-    if (!isValidRoomCode(code)) return;
+    const payload = joinPayloadFromInput(joinCode);
+    if (!payload) return;
+    const isRejoin = Boolean(payload.reconnectToken);
+    if (!isRejoin && !joinName.trim()) return;
     const pid = `player-join-${Date.now()}`;
     setBlackjack({
       type: "online-join",
       playerId: pid,
-      roomCode: code,
+      roomCode: payload.roomCode,
       playerName: joinName.trim() || "Guest",
+      reconnectToken: payload.reconnectToken,
     });
     router.push("/games/blackjack/play");
   }
@@ -129,7 +135,7 @@ export function BlackjackLobby({ onStart }: BlackjackLobbyProps) {
             <ModeCard
               icon="🔗"
               title="Online — Join room"
-              description="Enter the 6-letter code from the host."
+              description="Enter the 6-letter code from the host, or a rejoin code if you got disconnected."
               onClick={() => setScreen("online-join-setup")}
             />
           </>
@@ -231,7 +237,10 @@ export function BlackjackLobby({ onStart }: BlackjackLobbyProps) {
   // ─── Online join setup ────────────────────────────────────────────────────────
 
   if (screen === "online-join-setup") {
-    const codeValid = isValidRoomCode(normalizeRoomCode(joinCode));
+    const payload = joinPayloadFromInput(joinCode);
+    const codeValid = payload !== null;
+    const isRejoin = Boolean(payload?.reconnectToken);
+    const canJoin = codeValid && (isRejoin || Boolean(joinName.trim()));
 
     return (
       <div className="flex flex-col gap-6 w-full">
@@ -239,21 +248,21 @@ export function BlackjackLobby({ onStart }: BlackjackLobbyProps) {
 
         <div className="flex flex-col gap-3">
           <label className="text-sm font-medium text-[rgb(var(--color-text-muted))]">
-            Your name
+            Your name {isRejoin ? "(optional)" : ""}
           </label>
           <NameInput placeholder="Your name" value={joinName} onChange={setJoinName} />
         </div>
 
         <div className="flex flex-col gap-3">
           <label className="text-sm font-medium text-[rgb(var(--color-text-muted))]">
-            Room code
+            Room or rejoin code
           </label>
           <input
             type="text"
-            placeholder="e.g. A3K7P2"
+            placeholder="e.g. A3K7P2 or A3K7P2-K9M4"
             value={joinCode}
-            onChange={(e) => setJoinCode(normalizeRoomCode(e.target.value))}
-            maxLength={6}
+            onChange={(e) => setJoinCode(formatJoinCodeInput(e.target.value))}
+            maxLength={11}
             className={cn(
               "h-12 px-3 text-center text-xl font-mono tracking-widest uppercase",
               "bg-[rgb(var(--color-surface))]",
@@ -265,10 +274,13 @@ export function BlackjackLobby({ onStart }: BlackjackLobbyProps) {
               "transition-colors"
             )}
           />
+          <p className="text-xs text-[rgb(var(--color-text-muted))]">
+            Got disconnected? Paste the rejoin code your friends share so you sit back down in the same seat.
+          </p>
         </div>
 
-        <Button size="lg" fullWidth onClick={handleOnlineJoin} disabled={!codeValid || !joinName.trim()}>
-          Join room
+        <Button size="lg" fullWidth onClick={handleOnlineJoin} disabled={!canJoin}>
+          {isRejoin ? "Rejoin game" : "Join room"}
         </Button>
       </div>
     );

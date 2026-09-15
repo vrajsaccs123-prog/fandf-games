@@ -106,7 +106,7 @@ export function getCaboRules(): GameRules {
       },
       {
         title: 'Disconnection',
-        content: 'If a player disconnects, the game pauses until they reconnect. No automatic play occurs.',
+        content: 'If a player disconnects, the game pauses. Remaining players see a rejoin code they can share so that person can sit back down in the same seat. No automatic play occurs.',
       },
     ],
     glossary: [

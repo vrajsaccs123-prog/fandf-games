@@ -5,7 +5,7 @@
  *
  * Works in two modes:
  *  • Offline (myPlayerId = undefined): single-device pass-and-play.
- *    Spymasters use the 🔑 key toggle. Anyone on the current team can act.
+ *    Spymasters use Show Key while giving a clue. Anyone on the current team can act.
  *
  *  • Online (myPlayerId = string): each player uses their own device.
  *    Role is derived from state — spymasters always see card types;
@@ -20,6 +20,7 @@ import type { CodenamesState, WordCard, CardType, Team } from "../types";
 import type { CodenamesAction } from "../actions";
 import { RulesDrawer, RulesHelpButton, useRulesHelp } from "@/components/game/RulesDrawer";
 import { codenamesHelp } from "../help";
+import { formatTimerClock, remainingTimerMs } from "../timer";
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,8 @@ interface Props {
   onPlayAgain: () => void;
   /** Provided in online mode — drives role-based display. Absent = offline. */
   myPlayerId?: string;
+  /** Online host (or omitted in local play). Only this device expires the timer. */
+  isHost?: boolean;
 }
 
 // ─── Log helpers ──────────────────────────────────────────────────────────────
@@ -42,8 +45,9 @@ interface LogGuess {
 interface LogTurn {
   turnNum: number;
   team: Team;
-  clue: { word: string; count: number };
+  clue: { word: string; count: number } | null;
   guesses: LogGuess[];
+  timedOut?: boolean;
 }
 
 function buildLog(state: CodenamesState): LogTurn[] {
@@ -67,6 +71,20 @@ function buildLog(state: CodenamesState): LogTurn[] {
         word: evt.payload.word as string,
         type: evt.payload.cardType as CardType,
       });
+    } else if (evt.type === "TIMER_EXPIRED") {
+      if (current) {
+        current.timedOut = true;
+        turns.push(current);
+        current = null;
+      } else {
+        turns.push({
+          turnNum: evt.turn,
+          team: evt.payload.team as Team,
+          clue: null,
+          guesses: [],
+          timedOut: true,
+        });
+      }
     }
   }
   if (current) turns.push(current);
@@ -75,8 +93,11 @@ function buildLog(state: CodenamesState): LogTurn[] {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId }: Props) {
+export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId, isHost }: Props) {
   const isOnline = myPlayerId !== undefined;
+  const canExpireTimer = !isOnline || isHost === true;
+  const onActionRef = React.useRef(onAction);
+  onActionRef.current = onAction;
 
   // Derive this player's role
   const myPlayer = isOnline ? state.players.find((p) => p.id === myPlayerId) ?? null : null;
@@ -100,12 +121,30 @@ export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId
   const [logOpen, setLogOpen] = React.useState(false);
   const { open: rulesOpen, openRules, closeRules } = useRulesHelp();
   const [lastRevealedId, setLastRevealedId] = React.useState<number | null>(null);
+  const [highlightedIds, setHighlightedIds] = React.useState<number[]>([]);
+  const highlightAtRef = React.useRef<Record<number, number>>({});
   const logRef = React.useRef<HTMLDivElement>(null);
 
   // Auto-hide key when operatives start guessing (offline)
   React.useEffect(() => {
     if (!isOnline && state.phase === "guessing") setShowKey(false);
   }, [isOnline, state.phase]);
+
+  // Drop all highlights when the guessing turn ends
+  React.useEffect(() => {
+    if (state.phase === "guessing") return;
+    setHighlightedIds([]);
+    highlightAtRef.current = {};
+  }, [state.phase, state.turn, state.currentTeam]);
+
+  // Drop highlights for cards that have been revealed
+  React.useEffect(() => {
+    const revealed = new Set(state.words.filter((w) => w.revealed).map((w) => w.id));
+    setHighlightedIds((ids) => {
+      const next = ids.filter((id) => !revealed.has(id));
+      return next.length === ids.length ? ids : next;
+    });
+  }, [state.words]);
 
   // Scroll log to bottom when entries change
   const logLength = state.events.length;
@@ -114,6 +153,43 @@ export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
   }, [logOpen, logLength]);
+
+  // Host / local device ends the round when the timer hits zero
+  React.useEffect(() => {
+    if (!canExpireTimer) return;
+    if (state.phase === "game_over") return;
+    if (state.timerSeconds == null || state.phaseStartedAt == null) return;
+
+    const fire = () => {
+      const remaining = remainingTimerMs({
+        timerSeconds: state.timerSeconds,
+        phaseStartedAt: state.phaseStartedAt,
+      });
+      if (remaining != null && remaining <= 0) {
+        onActionRef.current({ type: "TIMER_EXPIRED" });
+      }
+    };
+
+    const remaining = remainingTimerMs({
+      timerSeconds: state.timerSeconds,
+      phaseStartedAt: state.phaseStartedAt,
+    });
+    if (remaining == null) return;
+    if (remaining <= 0) {
+      fire();
+      return;
+    }
+
+    const timeoutId = window.setTimeout(fire, remaining);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") fire();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearTimeout(timeoutId);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [canExpireTimer, state.phase, state.phaseStartedAt, state.timerSeconds, state.turn]);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -140,8 +216,25 @@ export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId
     // Online: only operative of current team can click
     // Offline: anyone (for current team)
     if (isOnline && !isMyOperativePhase) return;
-    setLastRevealedId(card.id);
-    onAction({ type: "GUESS_CARD", playerId: getActingPlayerId(), cardId: card.id });
+
+    if (highlightedIds.includes(card.id)) {
+      // Ignore an accidental double-tap so highlight and guess stay distinct
+      const markedAt = highlightAtRef.current[card.id] ?? 0;
+      if (Date.now() - markedAt < 400) return;
+      setHighlightedIds((ids) => ids.filter((id) => id !== card.id));
+      delete highlightAtRef.current[card.id];
+      setLastRevealedId(card.id);
+      onAction({ type: "GUESS_CARD", playerId: getActingPlayerId(), cardId: card.id });
+      return;
+    }
+
+    highlightAtRef.current[card.id] = Date.now();
+    setHighlightedIds((ids) => (ids.includes(card.id) ? ids : [...ids, card.id]));
+  }
+
+  function handleClearHighlights() {
+    setHighlightedIds([]);
+    highlightAtRef.current = {};
   }
 
   function handleGiveClue() {
@@ -169,8 +262,6 @@ export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId
         state={state}
         onPlayAgain={onPlayAgain}
         onExit={onExit}
-        showKey={showUnrevealedTypes}
-        onToggleKey={isOnline ? undefined : () => setShowKey((k) => !k)}
         logOpen={logOpen}
         onToggleLog={() => setLogOpen((o) => !o)}
         logRef={logRef}
@@ -186,13 +277,11 @@ export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId
     (isOnline ? isMyOperativePhase : true);
 
   return (
-    <div className="flex flex-col min-h-screen select-none">
+    <TableSurface>
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <Header
         state={state}
         isOnline={isOnline}
-        showKey={showUnrevealedTypes}
-        onToggleKey={isOnline ? undefined : () => setShowKey((k) => !k)}
         logOpen={logOpen}
         onToggleLog={() => setLogOpen((o) => !o)}
         onOpenRules={openRules}
@@ -202,6 +291,7 @@ export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId
 
       {/* ── Score Bar ──────────────────────────────────────────────────────── */}
       <ScoreBar state={state} />
+      <TimeUpBanner state={state} />
 
       {/* ── Board ──────────────────────────────────────────────────────────── */}
       <div className="flex-1 flex items-center justify-center p-2 sm:p-3">
@@ -213,6 +303,8 @@ export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId
                 card={card}
                 showType={showUnrevealedTypes}
                 isClickable={cardClickable(card)}
+                isHighlighted={state.phase === "guessing" && highlightedIds.includes(card.id)}
+                highlightTeam={state.currentTeam}
                 isLastRevealed={card.id === lastRevealedId}
                 onClick={() => handleCardClick(card)}
               />
@@ -238,6 +330,8 @@ export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId
           onClueCountChange={setClueCount}
           onGiveClue={handleGiveClue}
           onEndTurn={handleEndTurn}
+          highlightedCount={highlightedIds.length}
+          onClearHighlights={handleClearHighlights}
           myPlayer={myPlayer}
           currentSpymaster={currentSpymaster}
         />
@@ -246,6 +340,26 @@ export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId
       {/* ── Log Drawer ─────────────────────────────────────────────────────── */}
       <LogDrawer open={logOpen} onClose={() => setLogOpen(false)} state={state} logRef={logRef} />
       <RulesDrawer open={rulesOpen} onClose={closeRules} help={codenamesHelp} />
+    </TableSurface>
+  );
+}
+
+/** Full-viewport wooden table — cards and controls sit on the grain. */
+function TableSurface({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="relative flex flex-col h-dvh select-none overflow-hidden texture-wood">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 z-[1]"
+        style={{
+          boxShadow: "inset 0 0 90px 18px rgba(0,0,0,0.38)",
+          background:
+            "radial-gradient(ellipse 85% 68% at 50% 40%, rgba(255,196,120,0.12) 0%, transparent 64%)",
+        }}
+      />
+      <div className="relative z-10 flex flex-1 flex-col min-h-0 overflow-y-auto">
+        {children}
+      </div>
     </div>
   );
 }
@@ -255,8 +369,6 @@ export function CodenamesGame({ state, onAction, onExit, onPlayAgain, myPlayerId
 function Header({
   state,
   isOnline,
-  showKey,
-  onToggleKey,
   logOpen,
   onToggleLog,
   onOpenRules,
@@ -265,8 +377,6 @@ function Header({
 }: {
   state: CodenamesState;
   isOnline: boolean;
-  showKey: boolean;
-  onToggleKey?: () => void;
   logOpen: boolean;
   onToggleLog: () => void;
   onOpenRules: () => void;
@@ -316,20 +426,6 @@ function Header({
         >
           📋
         </button>
-
-        {/* Key toggle (offline only) */}
-        {onToggleKey && (
-          <button
-            onClick={onToggleKey}
-            className={cn(
-              "text-sm px-2 py-1 rounded-lg font-bold transition-all",
-              showKey ? "bg-amber-500 text-black" : "bg-white/10 text-white/70 hover:text-white"
-            )}
-            title="Toggle Spymaster Key"
-          >
-            🔑
-          </button>
-        )}
       </div>
     </div>
   );
@@ -341,9 +437,94 @@ function ScoreBar({ state }: { state: CodenamesState }) {
   return (
     <div className="flex items-center gap-2 px-3 py-2 bg-black/20">
       <TeamScore state={state} team="red" />
-      <div className="text-white/40 text-sm font-bold">vs</div>
+      <RoundTimer state={state} />
       <TeamScore state={state} team="blue" />
     </div>
+  );
+}
+
+function RoundTimer({ state }: { state: CodenamesState }) {
+  const [now, setNow] = React.useState(() => Date.now());
+  const active =
+    state.timerSeconds != null &&
+    state.phaseStartedAt != null &&
+    state.phase !== "game_over";
+
+  React.useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => setNow(Date.now()), 200);
+    return () => window.clearInterval(id);
+  }, [active, state.phaseStartedAt]);
+
+  if (!active || state.timerSeconds == null || state.phaseStartedAt == null) {
+    return <div className="text-white/40 text-sm font-bold">vs</div>;
+  }
+
+  const remainingMs = Math.max(0, state.phaseStartedAt + state.timerSeconds * 1000 - now);
+  const remainingSec = Math.ceil(remainingMs / 1000);
+  const ratio = remainingMs / (state.timerSeconds * 1000);
+  const urgent = remainingSec <= 10;
+
+  return (
+    <div className="flex flex-col items-center min-w-[4.5rem] px-1 shrink-0">
+      <span
+        className={cn(
+          "text-lg sm:text-xl font-black tabular-nums leading-none",
+          urgent ? "text-amber-300 animate-pulse" : "text-white"
+        )}
+      >
+        {formatTimerClock(remainingSec)}
+      </span>
+      <div className="w-full h-1 rounded-full bg-white/15 overflow-hidden mt-1">
+        <div
+          className={cn(
+            "h-full rounded-full transition-[width] duration-200",
+            urgent
+              ? "bg-amber-400"
+              : state.currentTeam === "red"
+              ? "bg-red-400"
+              : "bg-blue-400"
+          )}
+          style={{ width: `${Math.max(0, Math.min(100, ratio * 100))}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function TimeUpBanner({ state }: { state: CodenamesState }) {
+  const expired = [...state.events].reverse().find((e) => e.type === "TIMER_EXPIRED");
+  const [visible, setVisible] = React.useState(false);
+  const seenRef = React.useRef<number | null>(null);
+
+  React.useEffect(() => {
+    if (!expired) return;
+    if (seenRef.current === expired.timestamp) return;
+    if (Date.now() - expired.timestamp > 3000) {
+      seenRef.current = expired.timestamp;
+      return;
+    }
+    seenRef.current = expired.timestamp;
+    setVisible(true);
+    const id = window.setTimeout(() => setVisible(false), 2200);
+    return () => window.clearTimeout(id);
+  }, [expired?.timestamp]);
+
+  return (
+    <AnimatePresence>
+      {visible && (
+        <motion.div
+          initial={{ opacity: 0, y: -8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          className="px-3"
+        >
+          <div className="text-center text-xs font-bold tracking-wide uppercase py-1.5 rounded-lg bg-amber-400/20 text-amber-200 border border-amber-400/30">
+            ⏱ Time&apos;s up — other team&apos;s turn
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }
 
@@ -385,12 +566,16 @@ function WordCardTile({
   card,
   showType,
   isClickable,
+  isHighlighted = false,
+  highlightTeam = "red",
   isLastRevealed,
   onClick,
 }: {
   card: WordCard;
   showType: boolean;
   isClickable: boolean;
+  isHighlighted?: boolean;
+  highlightTeam?: Team;
   isLastRevealed: boolean;
   onClick: () => void;
 }) {
@@ -398,17 +583,21 @@ function WordCardTile({
 
   return (
     <motion.button
-      layout
+      type="button"
       onClick={isClickable ? onClick : undefined}
       disabled={!isClickable && !card.revealed}
-      animate={isLastRevealed && card.revealed ? { scale: [1, 1.08, 1] } : {}}
+      animate={isLastRevealed && card.revealed ? { scale: [1, 1.08, 1] } : { scale: 1 }}
       transition={{ duration: 0.3 }}
       className={cn(
-        "relative rounded-lg border shadow-sm",
+        "relative rounded-lg border",
         "flex flex-col items-center justify-center",
         "aspect-[4/3] p-1",
-        "transition-all duration-200",
         "text-[clamp(7px,2.2vw,12px)] font-black tracking-wide uppercase text-center leading-tight break-words overflow-hidden",
+        isHighlighted
+          ? highlightTeam === "red"
+            ? "shadow-[0_0_10px_3px_rgba(248,113,113,0.7),0_0_22px_8px_rgba(248,113,113,0.35)]"
+            : "shadow-[0_0_10px_3px_rgba(96,165,250,0.7),0_0_22px_8px_rgba(96,165,250,0.35)]"
+          : "shadow-[0_3px_8px_rgba(0,0,0,0.45),0_1px_2px_rgba(0,0,0,0.3)]",
         style
       )}
     >
@@ -423,7 +612,11 @@ function WordCardTile({
   );
 }
 
-function getCardStyle(card: WordCard, showType: boolean, isClickable: boolean): string {
+function getCardStyle(
+  card: WordCard,
+  showType: boolean,
+  isClickable: boolean,
+): string {
   if (card.revealed) {
     switch (card.type) {
       case "red":     return "bg-red-600 text-white border-red-700";
@@ -433,16 +626,20 @@ function getCardStyle(card: WordCard, showType: boolean, isClickable: boolean): 
     }
   }
   if (showType) {
-    switch (card.type) {
-      case "red":     return "bg-red-800/60 text-red-100 border-red-500 border-2";
-      case "blue":    return "bg-blue-800/60 text-blue-100 border-blue-500 border-2";
-      case "neutral": return "bg-stone-600/60 text-stone-200 border-stone-400 border-2";
-      case "assassin":return "bg-black text-gray-300 border-gray-500 border-2";
-    }
+    const typed = (() => {
+      switch (card.type) {
+        case "red":     return "bg-red-800/60 text-red-100 border-red-500 border-2";
+        case "blue":    return "bg-blue-800/60 text-blue-100 border-blue-500 border-2";
+        case "neutral": return "bg-stone-600/60 text-stone-200 border-stone-400 border-2";
+        case "assassin":return "bg-black text-gray-300 border-gray-500 border-2";
+      }
+    })();
+    return typed;
   }
+  const paper = "bg-[#f3e6c8] text-stone-800 border-[#c4a574]";
   return isClickable
-    ? "bg-amber-50 text-stone-800 border border-stone-300 hover:bg-amber-100 hover:border-stone-400 active:scale-95 cursor-pointer"
-    : "bg-stone-200/20 text-stone-300 border border-stone-600/30 cursor-default";
+    ? cn(paper, "cursor-pointer hover:bg-[#f7edd4] hover:border-[#b08d55]")
+    : cn(paper, "cursor-default");
 }
 
 // ─── Bottom Panel ─────────────────────────────────────────────────────────────
@@ -462,6 +659,8 @@ interface BottomPanelProps {
   onClueCountChange: (v: number) => void;
   onGiveClue: () => void;
   onEndTurn: () => void;
+  highlightedCount: number;
+  onClearHighlights: () => void;
   myPlayer: CodenamesState["players"][number] | null;
   currentSpymaster: CodenamesState["players"][number] | undefined;
 }
@@ -486,7 +685,12 @@ function BottomPanel(p: BottomPanelProps) {
       );
     }
     return (
-      <GuessingPanel state={state} onEndTurn={p.onEndTurn} />
+      <GuessingPanel
+        state={state}
+        onEndTurn={p.onEndTurn}
+        highlightedCount={p.highlightedCount}
+        onClearHighlights={p.onClearHighlights}
+      />
     );
   }
 
@@ -516,15 +720,22 @@ function BottomPanel(p: BottomPanelProps) {
     }
     return (
       <WaitingPanel
-        label={`⏳ ${capitalize(state.currentTeam === "red" ? "blue" : "red")} team is giving their clue…`}
-        team={state.currentTeam === "red" ? "blue" : "red"}
+        label={`⏳ ${capitalize(state.currentTeam)} team is giving their clue…`}
+        team={state.currentTeam}
       />
     );
   }
 
   if (state.phase === "guessing") {
     if (p.isMyOperativePhase) {
-      return <GuessingPanel state={state} onEndTurn={p.onEndTurn} />;
+      return (
+        <GuessingPanel
+          state={state}
+          onEndTurn={p.onEndTurn}
+          highlightedCount={p.highlightedCount}
+          onClearHighlights={p.onClearHighlights}
+        />
+      );
     }
     if (p.isMySpymaster && p.isMyTeamsTurn) {
       return (
@@ -654,9 +865,13 @@ function ClueInputPanel({
 function GuessingPanel({
   state,
   onEndTurn,
+  highlightedCount,
+  onClearHighlights,
 }: {
   state: CodenamesState;
   onEndTurn: () => void;
+  highlightedCount: number;
+  onClearHighlights: () => void;
 }) {
   const clue = state.currentClue;
   const teamBg =
@@ -713,8 +928,21 @@ function GuessingPanel({
         >
           End Turn →
         </Button>
-        <div className="text-xs text-white/40 flex items-center justify-center text-center leading-snug px-2">
-          Tap cards on the board to guess
+        <div className="text-xs text-white/40 flex flex-col items-center justify-center text-center leading-snug px-2 gap-1">
+          <span>
+            {highlightedCount > 0
+              ? `${highlightedCount} marked · tap a marked card to guess`
+              : "Tap to highlight · tap again to guess"}
+          </span>
+          {highlightedCount > 0 && (
+            <button
+              type="button"
+              onClick={onClearHighlights}
+              className="text-[11px] font-semibold text-white/70 underline underline-offset-2 hover:text-white"
+            >
+              Clear marks
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -793,7 +1021,7 @@ function LogDrawer({
             animate={{ y: 0 }}
             exit={{ y: "100%" }}
             transition={{ type: "spring", stiffness: 320, damping: 30 }}
-            className="fixed bottom-0 left-0 right-0 z-50 bg-[#0a200a] rounded-t-3xl border-t border-white/10 flex flex-col"
+            className="fixed bottom-0 left-0 right-0 z-50 bg-[#2a180c] rounded-t-3xl border-t border-amber-200/10 flex flex-col"
             style={{ maxHeight: "72vh" }}
           >
             {/* Handle + title */}
@@ -866,20 +1094,32 @@ function LogTurnCard({ turn }: { turn: LogTurn }) {
       </div>
 
       {/* Clue */}
-      <div className="flex items-center gap-2 bg-black/20 rounded-lg px-3 py-2">
-        <span className="text-white/50 text-xs">🕵️ Clue:</span>
-        <span className={cn("font-black text-sm uppercase tracking-wider", teamColor)}>
-          {turn.clue.word}
-        </span>
-        <span className="text-white/40 text-xs">×</span>
-        <span className="text-white font-bold text-sm">
-          {turn.clue.count === 0 ? "∞" : turn.clue.count}
-        </span>
-      </div>
+      {turn.clue ? (
+        <div className="flex items-center gap-2 bg-black/20 rounded-lg px-3 py-2">
+          <span className="text-white/50 text-xs">🕵️ Clue:</span>
+          <span className={cn("font-black text-sm uppercase tracking-wider", teamColor)}>
+            {turn.clue.word}
+          </span>
+          <span className="text-white/40 text-xs">×</span>
+          <span className="text-white font-bold text-sm">
+            {turn.clue.count === 0 ? "∞" : turn.clue.count}
+          </span>
+        </div>
+      ) : (
+        <p className="text-white/40 text-xs italic px-1">⏱ Time ran out before a clue was given</p>
+      )}
+
+      {turn.timedOut && turn.clue && (
+        <p className="text-amber-300/80 text-[10px] font-semibold uppercase tracking-wider px-1">
+          ⏱ Time ran out
+        </p>
+      )}
 
       {/* Guesses */}
       {turn.guesses.length === 0 ? (
-        <p className="text-white/30 text-xs italic px-1">No guesses made yet</p>
+        turn.clue ? (
+          <p className="text-white/30 text-xs italic px-1">No guesses made yet</p>
+        ) : null
       ) : (
         <div className="flex flex-col gap-1">
           {turn.guesses.map((g, i) => (
@@ -910,8 +1150,6 @@ function GameOverScreen({
   state,
   onPlayAgain,
   onExit,
-  showKey,
-  onToggleKey,
   logOpen,
   onToggleLog,
   logRef,
@@ -919,8 +1157,6 @@ function GameOverScreen({
   state: CodenamesState;
   onPlayAgain: () => void;
   onExit: () => void;
-  showKey: boolean;
-  onToggleKey?: () => void;
   logOpen: boolean;
   onToggleLog: () => void;
   logRef: React.RefObject<HTMLDivElement | null>;
@@ -930,7 +1166,7 @@ function GameOverScreen({
   const isAssassin = state.winReason?.includes("Assassin");
 
   return (
-    <div className="flex flex-col min-h-screen">
+    <TableSurface>
       <div className="flex items-center justify-between px-3 py-2 bg-black/30 gap-2">
         <button onClick={onExit} className="text-white/70 hover:text-white text-sm">
           ← Exit
@@ -946,17 +1182,6 @@ function GameOverScreen({
           >
             📋
           </button>
-          {onToggleKey && (
-            <button
-              onClick={onToggleKey}
-              className={cn(
-                "text-sm px-2 py-1 rounded-lg font-bold",
-                showKey ? "bg-amber-500 text-black" : "bg-white/10 text-white/70"
-              )}
-            >
-              🔑
-            </button>
-          )}
         </div>
       </div>
 
@@ -985,7 +1210,7 @@ function GameOverScreen({
           animate={{ scale: 1, opacity: 1 }}
           transition={{ type: "spring", stiffness: 300, damping: 24 }}
           className={cn(
-            "relative z-10 rounded-3xl border-2 p-8 flex flex-col items-center gap-4 text-center max-w-xs w-full shadow-2xl bg-[#0d2b0d]/95 backdrop-blur",
+            "relative z-10 rounded-3xl border-2 p-8 flex flex-col items-center gap-4 text-center max-w-xs w-full shadow-2xl bg-[#2a180c]/92 backdrop-blur",
             isRed ? "border-red-500" : "border-blue-500"
           )}
         >
@@ -1019,7 +1244,7 @@ function GameOverScreen({
 
       {/* Log drawer on game over too */}
       <LogDrawer open={logOpen} onClose={onToggleLog} state={state} logRef={logRef} />
-    </div>
+    </TableSurface>
   );
 }
 

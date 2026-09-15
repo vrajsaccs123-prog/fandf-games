@@ -42,7 +42,7 @@ export const modernArtRules: GameRules = {
     {
       title: "Open Auction",
       content:
-        "Anyone can bid any amount, any number of times. Each new bid must exceed the previous. The Auctioneer decides when to close bidding. If nobody bids, the Auctioneer receives the painting for free. If another player wins, they pay the Auctioneer. If the Auctioneer wins, they pay the Bank.",
+        "Anyone can bid any amount, any number of times. Each new bid must exceed the previous. The Auctioneer decides when to close bidding, but bidding stays open for at least 10 seconds. If nobody bids, the Auctioneer receives the painting for free. If another player wins, they pay the Auctioneer. If the Auctioneer wins, they pay the Bank.",
     },
     {
       title: "One Offer Auction",

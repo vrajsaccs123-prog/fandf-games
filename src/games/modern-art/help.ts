@@ -25,7 +25,7 @@ export const modernArtHelp: GameHelpRules = {
     {
       title: "Open Auction",
       iconKey: "open",
-      text: "Anyone can bid. Auctioneer closes bidding. No bids = free to Auctioneer.",
+      text: "Anyone can bid. Auctioneer can close after 10 seconds. No bids = free to Auctioneer.",
     },
     {
       title: "One Offer",

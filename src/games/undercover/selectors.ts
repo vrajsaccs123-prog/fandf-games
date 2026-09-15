@@ -81,6 +81,7 @@ export interface UndercoverPlayerView {
 
   // Pending states (only relevant to specific players)
   pendingElimination: string | null;
+  awaitingJudgeDecision: boolean;
   pendingRevenger: string | null;
   pendingMrWhiteGuess: string | null;
 
@@ -211,7 +212,9 @@ export function getPlayerView(
   // Reveal vote totals once voting is finished (including host confirm screen)
   const showVoteResult =
     state.voteResult !== null &&
-    (state.phase !== "voting" || state.pendingElimination !== null);
+    (state.phase !== "voting" ||
+      state.pendingElimination !== null ||
+      state.pendingJudgeDecision !== null);
   // Expose all votes during voting for transparency
   const allVotes: Record<string, string> =
     state.phase === "voting" ? { ...state.votes } : {};
@@ -239,6 +242,7 @@ export function getPlayerView(
     ghostEnabled,
     activeSpecialCharacters: state.settings.specialCharacters,
     pendingElimination: state.pendingElimination,
+    awaitingJudgeDecision: state.pendingJudgeDecision !== null,
     pendingRevenger: state.pendingRevenger,
     pendingMrWhiteGuess: state.pendingMrWhiteGuess,
     roundScores: state.roundScores,
@@ -298,6 +302,17 @@ export function getAvailableActions(
     }
 
     case "voting": {
+      if (state.pendingJudgeDecision) {
+        if (playerId === state.pendingJudgeDecision && state.voteResult) {
+          for (const targetId of state.voteResult.leaders) {
+            actions.push({ type: "JUDGE_DECISION", judgeId: playerId, targetId });
+          }
+        }
+        if (state.mode === "offline" || state.creatorId === playerId) {
+          actions.push({ type: "REQUEST_REVOTE" });
+        }
+        break;
+      }
       if (!state.pendingElimination) {
         const ghostEnabled = state.settings.specialCharacters.ghost;
         const voterOrder = getVoterOrder(state.players, state.turnOrder, ghostEnabled);
@@ -391,12 +406,15 @@ export function getStatus(state: UndercoverState): {
   if (state.phase === "clue_phase") {
     currentPlayerId = activeTurnOrder[state.currentClueIndex];
   } else if (state.phase === "voting") {
-    const voterOrder = getVoterOrder(
-      state.players,
-      state.turnOrder,
-      state.settings.specialCharacters.ghost
-    );
-    currentPlayerId = voterOrder[state.currentVoterIndex];
+    if (!state.pendingJudgeDecision) {
+      const voterOrder = getVoterOrder(
+        state.players,
+        state.turnOrder,
+        state.settings.specialCharacters.ghost
+      );
+      currentPlayerId = voterOrder[state.currentVoterIndex];
+    }
+    // While the Judge breaks a tie, omit currentPlayerId so the Judge's identity stays hidden.
   } else if (state.phase === "revenger_pick") {
     currentPlayerId = state.pendingRevenger ?? undefined;
   } else if (state.phase === "mr_white_guess") {

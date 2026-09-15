@@ -20,7 +20,7 @@ import type { UndercoverAction } from "./actions";
 import { processElimination, processRevengerTarget } from "./engine/elimination";
 import { checkWinConditions } from "./engine/winConditions";
 import { applyRoundScores } from "./scoring";
-import { getLivingPlayers, getVoterOrder, isEligibleVoter } from "./engine/roles";
+import { getLivingJudge, getLivingPlayers, getVoterOrder, isEligibleVoter } from "./engine/roles";
 import { createRng } from "@/game/core/random";
 
 // ─── Reducer ──────────────────────────────────────────────────────────────────
@@ -47,6 +47,9 @@ export function reduce(
     // ── Voting ──────────────────────────────────────────────────────────────
     case "SUBMIT_VOTE":
       return handleSubmitVote(state, action.voterId, action.targetId);
+
+    case "JUDGE_DECISION":
+      return handleJudgeDecision(state, action.judgeId, action.targetId);
 
     case "ADMIN_ELIMINATE":
       return handleAdminEliminate(state, action.targetId);
@@ -146,6 +149,7 @@ function handleSubmitClue(
       currentVoterIndex: 0,
       votes: {},
       pendingElimination: null,
+      pendingJudgeDecision: null,
       voteResult: null,
     };
   }
@@ -161,7 +165,7 @@ function handleSubmitVote(
   targetId: string
 ): UndercoverState {
   if (state.phase !== "voting") return state;
-  if (state.pendingElimination) return state;
+  if (state.pendingElimination || state.pendingJudgeDecision) return state;
   if (voterId === targetId) return state;
   if (state.votes[voterId] !== undefined) return state;
 
@@ -196,17 +200,19 @@ function handleSubmitVote(
 
 /** Host throws out the tally and everyone votes again this round. */
 function handleRequestRevote(state: UndercoverState): UndercoverState {
-  if (state.phase !== "voting" || !state.pendingElimination) return state;
+  if (state.phase !== "voting") return state;
+  if (!state.pendingElimination && !state.pendingJudgeDecision) return state;
   return {
     ...state,
     votes: {},
     voteResult: null,
     pendingElimination: null,
+    pendingJudgeDecision: null,
     currentVoterIndex: 0,
   };
 }
 
-/** Tally votes, resolve ties randomly, set pendingElimination. Stays in voting phase. */
+/** Tally votes. Ties wait for a living Judge; otherwise pick a target and stay in voting. */
 function calculateAndSetElimination(state: UndercoverState): UndercoverState {
   const totals: Record<string, number> = {};
   for (const targetId of Object.values(state.votes)) {
@@ -220,17 +226,77 @@ function calculateAndSetElimination(state: UndercoverState): UndercoverState {
 
   const voteResult = { totals, maxVotes, leaders, isTie: leaders.length > 1 };
 
-  // Tie → seeded random selection (no judge mechanic in simplified flow)
-  let pendingElimination: string;
   if (leaders.length > 1) {
+    const judge = getLivingJudge(state.players);
+    if (judge) {
+      // Living Judge casts one extra vote among the tied players before host confirm.
+      return {
+        ...state,
+        voteResult,
+        pendingElimination: null,
+        pendingJudgeDecision: judge.id,
+      };
+    }
     const rng = createRng(state.seed + "-tiebreak-" + state.roundNumber);
-    pendingElimination = rng.pick(leaders) as string;
-  } else {
-    pendingElimination = leaders[0];
+    return {
+      ...state,
+      voteResult,
+      pendingElimination: rng.pick(leaders) as string,
+      pendingJudgeDecision: null,
+    };
   }
 
-  return { ...state, voteResult, pendingElimination };
-  // Phase stays "voting"; UI detects pendingElimination to show confirmation.
+  return {
+    ...state,
+    voteResult,
+    pendingElimination: leaders[0],
+    pendingJudgeDecision: null,
+  };
+}
+
+/** Living Judge adds one extra vote to a tied player, then host confirms as usual. */
+function handleJudgeDecision(
+  state: UndercoverState,
+  judgeId: string,
+  targetId: string
+): UndercoverState {
+  if (state.phase !== "voting") return state;
+  if (state.pendingJudgeDecision !== judgeId) return state;
+  if (!state.voteResult?.leaders.includes(targetId)) return state;
+
+  const target = state.players.find((p) => p.id === targetId);
+  if (!target || target.isEliminated) return state;
+
+  const totals = {
+    ...state.voteResult.totals,
+    [targetId]: (state.voteResult.totals[targetId] ?? 0) + 1,
+  };
+  const maxVotes = Math.max(0, ...Object.values(totals));
+  const leaders = Object.entries(totals)
+    .filter(([, count]) => count === maxVotes)
+    .map(([id]) => id);
+
+  return {
+    ...state,
+    voteResult: {
+      totals,
+      maxVotes,
+      leaders,
+      isTie: false,
+      tieBrokenByJudge: true,
+    },
+    pendingElimination: targetId,
+    pendingJudgeDecision: null,
+    events: [
+      ...state.events,
+      {
+        type: "JUDGE_DECISION" as const,
+        payload: { targetId },
+        roundNumber: state.roundNumber,
+        timestamp: Date.now(),
+      },
+    ],
+  };
 }
 
 /** Offline: host picked someone directly — go straight to elimination_reveal. */
@@ -271,6 +337,7 @@ function processEliminationAndReveal(
     eliminatedThisRound: [...state.eliminatedThisRound, ...result.eliminatedIds],
     pendingElimination: null,
     voteResult: null,
+    pendingJudgeDecision: null,
     events: [
       ...state.events,
       ...result.events.map((e) => ({
@@ -522,6 +589,7 @@ function advanceRoundInPlace(state: UndercoverState): UndercoverState {
     votes: {},
     voteResult: null,
     pendingElimination: null,
+    pendingJudgeDecision: null,
     eliminatedThisRound: [],
     pendingRevenger: null,
     pendingMrWhiteGuess: null,
